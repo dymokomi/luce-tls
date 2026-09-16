@@ -1,0 +1,9 @@
+[package]
+name = "luce_tls"
+source = "src"
+
+[exports]
+tls = "luce_tls.tls"
+
+[dependencies]
+luce_crypto = "../luce-crypto"

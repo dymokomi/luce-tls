@@ -1,0 +1,70 @@
+## TLS 1.3 helpers. Not a handshake or HTTPS stack.
+import crypto_native
+
+pub let invalid = crypto_native.invalid
+
+pub struct RecordHeader:
+    pub var content_type: u8
+    pub var version: u16
+    pub var length: u16
+
+pub func parse_record(data: const u8[]) -> RecordHeader!:
+    if data.length < 5: error(invalid, "truncated TLS record header")
+    let kind = data[0]
+    if kind != 20 and kind != 21 and kind != 22 and kind != 23:
+        error(invalid, "unknown TLS record type")
+    let version = ((u16)data[1] << 8) | (u16)data[2]
+    if version != 0x0303 and version != 0x0301:
+        error(invalid, "unsupported TLS record version")
+    let length = ((u16)data[3] << 8) | (u16)data[4]
+    if length > 16384 + 256: error(invalid, "TLS record length exceeds 2^14+256")
+    return RecordHeader(content_type = kind, version = version, length = length)
+
+func lower_ascii(c: u8) -> u8:
+    if c >= 'A' and c <= 'Z': return c + 32
+    return c
+
+func equal_ignore_case(a: str, b: str) -> bool:
+    if a.length != b.length: return false
+    for i in 0..<a.length:
+        if lower_ascii(a.bytes[i]) != lower_ascii(b.bytes[i]): return false
+    return true
+
+## Exact match or a single leftmost wildcard (*.example.com). ASCII DNS only.
+pub func hostname_matches(presented: str, host: str) -> bool:
+    if presented.length == 0 or host.length == 0: return false
+    if equal_ignore_case(presented, host): return true
+    if presented.length < 3 or presented.bytes[0] != '*' or presented.bytes[1] != '.': return false
+    let suffix = (str)presented.bytes[1..]
+    if host.length <= suffix.length: return false
+    let tail = (str)host.bytes[host.length - suffix.length..]
+    if not equal_ignore_case(tail, suffix): return false
+    let prefix = (str)host.bytes[..<host.length - suffix.length]
+    if prefix.length == 0: return false
+    for i in 0..<prefix.length:
+        if prefix.bytes[i] == '.': return false
+    return true
+
+## RFC 8446 HKDF-Expand-Label with SHA-256. label is the suffix after "tls13 ".
+pub func expand_label(secret: const u8[], label: const u8[], context: const u8[], output: u8[]) -> !:
+    if output.length == 0 or output.length > 255: error(invalid, "TLS Expand-Label length")
+    if label.length > 249: error(invalid, "TLS Expand-Label label is too long")
+    if context.length > 255: error(invalid, "TLS Expand-Label context is too long")
+    let prefix = b"tls13 "
+    var info: u8[512]
+    info[0] = (u8)(output.length >> 8)
+    info[1] = (u8)output.length
+    info[2] = (u8)(prefix.length + label.length)
+    var at: usize = 3
+    for i in 0..<prefix.length:
+        info[at] = prefix[i]
+        at += 1
+    for i in 0..<label.length:
+        info[at] = label[i]
+        at += 1
+    info[at] = (u8)context.length
+    at += 1
+    for i in 0..<context.length:
+        info[at] = context[i]
+        at += 1
+    try crypto_native.hkdf_expand(secret, info[..<at], output, "sha256")
