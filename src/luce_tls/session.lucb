@@ -489,3 +489,279 @@ pub func receive(conn: net.Connection*, secrets: Secrets*, out: u8[]) -> usize!:
             out[i] = plain[i]
         return plen
     return 0
+
+func put_u24(buf: u8[], pos: usize*, v: usize):
+    buf[*pos] = (u8)((v >> 16) & 0xff)
+    buf[*pos + 1] = (u8)((v >> 8) & 0xff)
+    buf[*pos + 2] = (u8)(v & 0xff)
+    *pos += 3
+
+func put_hs(buf: u8[], pos: usize*, kind: u8, payload: const u8[], count: usize):
+    buf[*pos] = kind
+    *pos += 1
+    put_u24(buf, pos, count)
+    for i in 0..<count:
+        buf[*pos + i] = payload[i]
+    *pos += count
+
+func parse_client_hello(ch: const u8[], client_random: u8[], session_id: u8[], sid_len: usize*, client_pub: u8[]) -> !:
+    if ch.length < 40 or ch[0] != 1:
+        error(invalid, "not a ClientHello")
+    var pos: usize = 4
+    pos += 2
+    for i in 0..<32:
+        client_random[i] = ch[pos + (usize)i]
+    pos += 32
+    let sid = (usize)ch[pos]
+    if sid > 32:
+        error(invalid, "ClientHello session id is too long")
+    *sid_len = sid
+    pos += 1
+    for i in 0..<sid:
+        session_id[i] = ch[pos + i]
+    pos += sid
+    let cs_len = ((usize)ch[pos] << 8) | (usize)ch[pos + 1]
+    pos += 2 + cs_len
+    let cm_len = (usize)ch[pos]
+    pos += 1 + cm_len
+    let ext_len = ((usize)ch[pos] << 8) | (usize)ch[pos + 1]
+    pos += 2
+    let ext_end = pos + ext_len
+    var found = false
+    while pos + 4 <= ext_end:
+        let etype = ((usize)ch[pos] << 8) | (usize)ch[pos + 1]
+        let elen = ((usize)ch[pos + 2] << 8) | (usize)ch[pos + 3]
+        pos += 4
+        if etype == 0x0033:
+            var p = pos
+            let list_len = ((usize)ch[p] << 8) | (usize)ch[p + 1]
+            p += 2
+            let list_end = p + list_len
+            while p + 4 <= list_end:
+                let group = ((usize)ch[p] << 8) | (usize)ch[p + 1]
+                let klen = ((usize)ch[p + 2] << 8) | (usize)ch[p + 3]
+                p += 4
+                if group == 0x001d and klen == 32:
+                    for i in 0..<32:
+                        client_pub[i] = ch[p + (usize)i]
+                    found = true
+                p += klen
+        pos += elen
+    if not found:
+        error(invalid, "ClientHello has no x25519 key_share")
+
+func encode_der_int(body: u8[], used: usize*, digits: const u8[]):
+    var start: usize = 0
+    while start + 1 < 32 and digits[start] == 0:
+        start += 1
+    let high_bit = digits[start] >= 0x80
+    body[*used] = 0x02
+    *used += 1
+    let ilen = (32 - start) + (1 if high_bit else 0)
+    body[*used] = (u8)ilen
+    *used += 1
+    if high_bit:
+        body[*used] = 0
+        *used += 1
+    for i in start..<32:
+        body[*used] = digits[i]
+        *used += 1
+
+func encode_ecdsa_der(r: const u8[], s: const u8[], out: u8[]) -> usize!:
+    var body: u8[80]
+    var used: usize = 0
+    encode_der_int(body, &used, r)
+    encode_der_int(body, &used, s)
+    if 2 + used > out.length:
+        error(invalid, "ECDSA DER is too large")
+    out[0] = 0x30
+    out[1] = (u8)used
+    for i in 0..<used:
+        out[2 + i] = body[i]
+    return 2 + used
+
+## TLS 1.3 server handshake on an accepted TCP connection. `secrets` is filled so
+## send() writes with this endpoint's key and receive() reads the peer's.
+pub func accept(conn: net.Connection*, host: str, cert: const u8[], d: const u8[], qx: const u8[], qy: const u8[], secrets: Secrets*) -> !:
+    discard(host)
+    discard(qx)
+    discard(qy)
+    var record: u8[16640]
+    try read_record(conn, record)
+    if record[0] != 22:
+        error(invalid, "expected a ClientHello record")
+    let ch_len = record_length(record)
+    var client_random: u8[32]
+    var session_id: u8[32]
+    var sid_len: usize = 0
+    var client_pub: u8[32]
+    try parse_client_hello(record[5..<5 + ch_len], client_random, session_id, &sid_len, client_pub)
+    var transcript = try crypto.make_hash("sha256")
+    try transcript.update(record[5..<5 + ch_len])
+    var priv: u8[32]
+    try os.random_bytes(priv)
+    var pub_key: u8[32]
+    try crypto.x25519_base(pub_key, priv)
+    var server_random: u8[32]
+    try os.random_bytes(server_random)
+    var sh_body: u8[256]
+    var sp: usize = 0
+    put_u16(sh_body, &sp, 0x0303)
+    put_bytes(sh_body, &sp, server_random, 32)
+    put_u8(sh_body, &sp, (u8)sid_len)
+    put_bytes(sh_body, &sp, session_id, sid_len)
+    put_u8(sh_body, &sp, 0x13)
+    put_u8(sh_body, &sp, 0x03)
+    put_u8(sh_body, &sp, 0)
+    let ext_len_at = sp
+    sp += 2
+    let ext_start = sp
+    put_u16(sh_body, &sp, 0x002b)
+    put_u16(sh_body, &sp, 2)
+    put_u16(sh_body, &sp, 0x0304)
+    put_u16(sh_body, &sp, 0x0033)
+    put_u16(sh_body, &sp, 36)
+    put_u16(sh_body, &sp, 0x001d)
+    put_u16(sh_body, &sp, 32)
+    put_bytes(sh_body, &sp, pub_key, 32)
+    let ext_total = sp - ext_start
+    var patch = ext_len_at
+    put_u16(sh_body, &patch, (u32)ext_total)
+    var sh: u8[280]
+    sh[0] = 2
+    sh[1] = (u8)((sp >> 16) & 0xff)
+    sh[2] = (u8)((sp >> 8) & 0xff)
+    sh[3] = (u8)(sp & 0xff)
+    for i in 0..<sp:
+        sh[4 + i] = sh_body[i]
+    let sh_len = 4 + sp
+    try transcript.update(sh[..<sh_len])
+    try send_record(conn, 22, sh[..<sh_len], sh_len)
+    var shared: u8[32]
+    try crypto.x25519(shared, priv, client_pub)
+    var zeros: u8[32]
+    for i in 0..<32:
+        zeros[i] = 0
+    var early: u8[32]
+    try hkdf_extract(zeros, zeros, early)
+    var empty_hash: u8[32]
+    discard(try crypto.digest(b"", empty_hash, "sha256"))
+    var derived: u8[32]
+    try tls.expand_label(early, b"derived", empty_hash, derived)
+    var hs_secret: u8[32]
+    try hkdf_extract(derived, shared, hs_secret)
+    var th_sh: u8[32]
+    try snapshot(&transcript, th_sh)
+    var c_hs: u8[32]
+    var s_hs: u8[32]
+    try tls.expand_label(hs_secret, b"c hs traffic", th_sh, c_hs)
+    try tls.expand_label(hs_secret, b"s hs traffic", th_sh, s_hs)
+    var c_hs_key: u8[32]
+    var c_hs_iv: u8[12]
+    var s_hs_key: u8[32]
+    var s_hs_iv: u8[12]
+    try traffic_keys(c_hs, c_hs_key, c_hs_iv)
+    try traffic_keys(s_hs, s_hs_key, s_hs_iv)
+    var cert_payload: u8[4096]
+    var cp: usize = 0
+    put_u8(cert_payload, &cp, 0)
+    let list_len = 3 + cert.length + 2
+    put_u24(cert_payload, &cp, list_len)
+    put_u24(cert_payload, &cp, cert.length)
+    put_bytes(cert_payload, &cp, cert, cert.length)
+    put_u16(cert_payload, &cp, 0)
+    var cert_msg: u8[4100]
+    var cm: usize = 0
+    put_hs(cert_msg, &cm, 11, cert_payload[..<cp], cp)
+    try transcript.update(cert_msg[..<cm])
+    var th_cert: u8[32]
+    try snapshot(&transcript, th_cert)
+    var signed: u8[130]
+    for i in 0..<64:
+        signed[i] = 0x20
+    let ctx = b"TLS 1.3, server CertificateVerify"
+    for i in 0..<ctx.length:
+        signed[64 + i] = ctx[i]
+    signed[64 + ctx.length] = 0
+    var at = 64 + ctx.length + 1
+    for i in 0..<32:
+        signed[at + (usize)i] = th_cert[i]
+    at += 32
+    var digest: u8[32]
+    discard(try crypto.digest(signed[..<at], digest, "sha256"))
+    var rr: u8[32]
+    var ss: u8[32]
+    try crypto.ecdsa_p256_sign(d, digest, rr, ss)
+    var der: u8[80]
+    let der_n = try encode_ecdsa_der(rr, ss, der)
+    var cv_payload: u8[96]
+    var cvp: usize = 0
+    put_u16(cv_payload, &cvp, 0x0403)
+    put_u16(cv_payload, &cvp, (u32)der_n)
+    put_bytes(cv_payload, &cvp, der, der_n)
+    var cv_msg: u8[112]
+    var cvm: usize = 0
+    put_hs(cv_msg, &cvm, 15, cv_payload[..<cvp], cvp)
+    try transcript.update(cv_msg[..<cvm])
+    var th_cv: u8[32]
+    try snapshot(&transcript, th_cv)
+    var fin_key: u8[32]
+    try expand_empty(s_hs, b"finished", fin_key)
+    var verify_data: u8[32]
+    discard(try crypto.authenticate(fin_key, th_cv, verify_data, "sha256"))
+    var fin_payload: u8[32]
+    for i in 0..<32:
+        fin_payload[i] = verify_data[i]
+    var fin_msg: u8[40]
+    var fm: usize = 0
+    put_hs(fin_msg, &fm, 20, fin_payload, 32)
+    try transcript.update(fin_msg[..<fm])
+    var flight: u8[8192]
+    var fl: usize = 0
+    for i in 0..<cm:
+        flight[fl + i] = cert_msg[i]
+    fl += cm
+    for i in 0..<cvm:
+        flight[fl + i] = cv_msg[i]
+    fl += cvm
+    for i in 0..<fm:
+        flight[fl + i] = fin_msg[i]
+    fl += fm
+    var ccs: u8[1]
+    ccs[0] = 1
+    try send_record(conn, 20, ccs, 1)
+    var server_hs_seq: u64 = 0
+    try send_encrypted(conn, s_hs_key, s_hs_iv, &server_hs_seq, 22, flight[..<fl], fl)
+    var th_fin: u8[32]
+    try snapshot(&transcript, th_fin)
+    var derived2: u8[32]
+    try tls.expand_label(hs_secret, b"derived", empty_hash, derived2)
+    var master: u8[32]
+    try hkdf_extract(derived2, zeros, master)
+    var c_ap: u8[32]
+    var s_ap: u8[32]
+    try tls.expand_label(master, b"c ap traffic", th_fin, c_ap)
+    try tls.expand_label(master, b"s ap traffic", th_fin, s_ap)
+    var got_finished = false
+    var client_hs_seq: u64 = 0
+    while not got_finished:
+        try read_record(conn, record)
+        let rlen = record_length(record)
+        if record[0] == 20:
+            continue
+        if record[0] != 23:
+            error(invalid, "expected client Finished")
+        var plain: u8[16640]
+        var inner: u8
+        var plen: usize
+        try decrypt_record(c_hs_key, c_hs_iv, client_hs_seq, record, rlen, plain, &inner, &plen)
+        client_hs_seq += 1
+        if inner != 22:
+            continue
+        try verify_finished(plain[..<plen], c_hs, th_fin)
+        got_finished = true
+    try traffic_keys(s_ap, secrets.client_key, secrets.client_iv)
+    try traffic_keys(c_ap, secrets.server_key, secrets.server_iv)
+    secrets.client_seq = 0
+    secrets.server_seq = 0
+

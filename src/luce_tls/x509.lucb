@@ -258,3 +258,193 @@ pub func verify_signed_by(der: const u8[], cert: Certificate*, issuer_x: const u
     var digest: u8[32]
     discard(try crypto_native.digest(der[cert.tbs_off..<cert.tbs_off + cert.tbs_len], digest, "sha256"))
     return try crypto_native.ecdsa_p256_verify(issuer_x, issuer_y, digest, cert.sig_r, cert.sig_s)
+
+func der_put(out: u8[], pos: usize*, src: const u8[], n: usize) -> !:
+    if *pos + n > out.length:
+        error(invalid, "DER buffer is too small")
+    for i in 0..<n:
+        out[*pos + i] = src[i]
+    *pos += n
+
+func der_len(out: u8[], pos: usize*, n: usize) -> !:
+    if n < 128:
+        if *pos + 1 > out.length:
+            error(invalid, "DER buffer is too small")
+        out[*pos] = (u8)n
+        *pos += 1
+        return
+    if n < 256:
+        if *pos + 2 > out.length:
+            error(invalid, "DER buffer is too small")
+        out[*pos] = 0x81
+        out[*pos + 1] = (u8)n
+        *pos += 2
+        return
+    if *pos + 3 > out.length:
+        error(invalid, "DER buffer is too small")
+    out[*pos] = 0x82
+    out[*pos + 1] = (u8)(n >> 8)
+    out[*pos + 2] = (u8)n
+    *pos += 3
+
+func der_tlv(out: u8[], pos: usize*, tag: u8, inner: const u8[], n: usize) -> !:
+    if *pos + 1 > out.length:
+        error(invalid, "DER buffer is too small")
+    out[*pos] = tag
+    *pos += 1
+    try der_len(out, pos, n)
+    try der_put(out, pos, inner, n)
+
+func der_integer(out: u8[], pos: usize*, value: const u8[], n: usize) -> !:
+    var start: usize = 0
+    while start + 1 < n and value[start] == 0:
+        start += 1
+    let need_pad = value[start] >= 0x80
+    var body: u8[33]
+    var blen: usize = 0
+    if need_pad:
+        body[0] = 0
+        blen = 1
+    for i in start..<n:
+        body[blen] = value[i]
+        blen += 1
+    try der_tlv(out, pos, 0x02, body[..<blen], blen)
+
+## Self-signed P-256 certificate for `host` (SAN dNSName). `d`/`qx`/`qy` are 32 bytes.
+pub func mint_self_signed(host: str, d: const u8[], qx: const u8[], qy: const u8[], der: u8[]) -> usize!:
+    if host.length == 0 or host.length > 64:
+        error(invalid, "certificate host name length")
+    if d.length < 32 or qx.length < 32 or qy.length < 32:
+        error(invalid, "P-256 key material must be 32 bytes")
+    let oid_sha = b"\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02"
+    let oid_ec = b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01"
+    let oid_p256 = b"\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07"
+    let oid_cn = b"\x06\x03\x55\x04\x03"
+    let oid_san = b"\x06\x03\x55\x1d\x11"
+    var alg: u8[16]
+    var alg_n: usize = 0
+    try der_tlv(alg, &alg_n, 0x30, oid_sha, oid_sha.length)
+    var cn_str: u8[80]
+    var cn_n: usize = 0
+    try der_tlv(cn_str, &cn_n, 0x0c, host.bytes, host.length)
+    var atv: u8[96]
+    var atv_n: usize = 0
+    try der_put(atv, &atv_n, oid_cn, oid_cn.length)
+    try der_put(atv, &atv_n, cn_str[..<cn_n], cn_n)
+    var atv_seq: u8[112]
+    var atv_seq_n: usize = 0
+    try der_tlv(atv_seq, &atv_seq_n, 0x30, atv[..<atv_n], atv_n)
+    var rdn: u8[128]
+    var rdn_n: usize = 0
+    try der_tlv(rdn, &rdn_n, 0x31, atv_seq[..<atv_seq_n], atv_seq_n)
+    var name: u8[144]
+    var name_n: usize = 0
+    try der_tlv(name, &name_n, 0x30, rdn[..<rdn_n], rdn_n)
+    let when = b"20200101000000Z"
+    var t1: u8[24]
+    var t1n: usize = 0
+    try der_tlv(t1, &t1n, 0x18, when, when.length)
+    let until = b"20400101000000Z"
+    var t2: u8[24]
+    var t2n: usize = 0
+    try der_tlv(t2, &t2n, 0x18, until, until.length)
+    var val_body: u8[64]
+    var val_n: usize = 0
+    try der_put(val_body, &val_n, t1[..<t1n], t1n)
+    try der_put(val_body, &val_n, t2[..<t2n], t2n)
+    var validity: u8[80]
+    var validity_n: usize = 0
+    try der_tlv(validity, &validity_n, 0x30, val_body[..<val_n], val_n)
+    var ec_body: u8[24]
+    var ec_n: usize = 0
+    try der_put(ec_body, &ec_n, oid_ec, oid_ec.length)
+    try der_put(ec_body, &ec_n, oid_p256, oid_p256.length)
+    var ec_seq: u8[32]
+    var ec_seq_n: usize = 0
+    try der_tlv(ec_seq, &ec_seq_n, 0x30, ec_body[..<ec_n], ec_n)
+    var pk: u8[66]
+    pk[0] = 0
+    pk[1] = 4
+    for i in 0..<32:
+        pk[2 + i] = qx[i]
+        pk[34 + i] = qy[i]
+    var bit: u8[80]
+    var bit_n: usize = 0
+    try der_tlv(bit, &bit_n, 0x03, pk, 66)
+    var spki_body: u8[128]
+    var spki_n: usize = 0
+    try der_put(spki_body, &spki_n, ec_seq[..<ec_seq_n], ec_seq_n)
+    try der_put(spki_body, &spki_n, bit[..<bit_n], bit_n)
+    var spki: u8[144]
+    var spki_seq_n: usize = 0
+    try der_tlv(spki, &spki_seq_n, 0x30, spki_body[..<spki_n], spki_n)
+    var dns: u8[80]
+    var dns_n: usize = 0
+    try der_tlv(dns, &dns_n, 0x82, host.bytes, host.length)
+    var gnames: u8[96]
+    var gnames_n: usize = 0
+    try der_tlv(gnames, &gnames_n, 0x30, dns[..<dns_n], dns_n)
+    var san_oct: u8[112]
+    var san_oct_n: usize = 0
+    try der_tlv(san_oct, &san_oct_n, 0x04, gnames[..<gnames_n], gnames_n)
+    var ext_body: u8[128]
+    var ext_n: usize = 0
+    try der_put(ext_body, &ext_n, oid_san, oid_san.length)
+    try der_put(ext_body, &ext_n, san_oct[..<san_oct_n], san_oct_n)
+    var ext: u8[144]
+    var ext_seq_n: usize = 0
+    try der_tlv(ext, &ext_seq_n, 0x30, ext_body[..<ext_n], ext_n)
+    var exts: u8[160]
+    var exts_n: usize = 0
+    try der_tlv(exts, &exts_n, 0x30, ext[..<ext_seq_n], ext_seq_n)
+    var ext3: u8[176]
+    var ext3_n: usize = 0
+    try der_tlv(ext3, &ext3_n, 0xa3, exts[..<exts_n], exts_n)
+    var ver: u8[8]
+    var ver_n: usize = 0
+    let two = b"\x02\x01\x02"
+    try der_tlv(ver, &ver_n, 0xa0, two, two.length)
+    var serial: u8[8]
+    var serial_n: usize = 0
+    let one = b"\x01"
+    try der_integer(serial, &serial_n, one, 1)
+    var tbs_body: u8[800]
+    var tbs_n: usize = 0
+    try der_put(tbs_body, &tbs_n, ver[..<ver_n], ver_n)
+    try der_put(tbs_body, &tbs_n, serial[..<serial_n], serial_n)
+    try der_put(tbs_body, &tbs_n, alg[..<alg_n], alg_n)
+    try der_put(tbs_body, &tbs_n, name[..<name_n], name_n)
+    try der_put(tbs_body, &tbs_n, validity[..<validity_n], validity_n)
+    try der_put(tbs_body, &tbs_n, name[..<name_n], name_n)
+    try der_put(tbs_body, &tbs_n, spki[..<spki_seq_n], spki_seq_n)
+    try der_put(tbs_body, &tbs_n, ext3[..<ext3_n], ext3_n)
+    var tbs: u8[900]
+    var tbs_seq_n: usize = 0
+    try der_tlv(tbs, &tbs_seq_n, 0x30, tbs_body[..<tbs_n], tbs_n)
+    var digest: u8[32]
+    discard(try crypto_native.digest(tbs[..<tbs_seq_n], digest, "sha256"))
+    var r: u8[32]
+    var s: u8[32]
+    try crypto_native.ecdsa_p256_sign(d, digest, r, s)
+    var rs: u8[80]
+    var rs_n: usize = 0
+    try der_integer(rs, &rs_n, r, 32)
+    try der_integer(rs, &rs_n, s, 32)
+    var rs_seq: u8[96]
+    var rs_seq_n: usize = 0
+    try der_tlv(rs_seq, &rs_seq_n, 0x30, rs[..<rs_n], rs_n)
+    var sig_bit_body: u8[100]
+    sig_bit_body[0] = 0
+    for i in 0..<rs_seq_n:
+        sig_bit_body[1 + i] = rs_seq[i]
+    var sig_bit: u8[112]
+    var sig_bit_n: usize = 0
+    try der_tlv(sig_bit, &sig_bit_n, 0x03, sig_bit_body[..<1 + rs_seq_n], 1 + rs_seq_n)
+    var cert_body: u8[1200]
+    var cert_n: usize = 0
+    try der_put(cert_body, &cert_n, tbs[..<tbs_seq_n], tbs_seq_n)
+    try der_put(cert_body, &cert_n, alg[..<alg_n], alg_n)
+    try der_put(cert_body, &cert_n, sig_bit[..<sig_bit_n], sig_bit_n)
+    var used: usize = 0
+    try der_tlv(der, &used, 0x30, cert_body[..<cert_n], cert_n)
+    return used
