@@ -4,6 +4,8 @@ source = "src"
 
 [exports]
 tls = "luce_tls.tls"
+x509 = "luce_tls.x509"
+session = "luce_tls.session"
 
 [dependencies]
 luce_crypto = "../luce-crypto"

@@ -9,16 +9,16 @@ from luce_tls.tls import hostname_matches
 pub let invalid = crypto_native.invalid
 
 pub struct Certificate:
-    var tbs_off: usize
-    var tbs_len: usize
-    var sig_r: u8[32]
-    var sig_s: u8[32]
-    var key_x: u8[32]
-    var key_y: u8[32]
-    var san_off: usize
-    var san_len: usize
-    var not_before: i64
-    var not_after: i64
+    pub var tbs_off: usize
+    pub var tbs_len: usize
+    pub var sig_r: u8[32]
+    pub var sig_s: u8[32]
+    pub var key_x: u8[32]
+    pub var key_y: u8[32]
+    pub var san_off: usize
+    pub var san_len: usize
+    pub var not_before: i64
+    pub var not_after: i64
 
     pub func init():
         let zero: u8[32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]

@@ -1,0 +1,491 @@
+## A minimal TLS 1.3 client: X25519 key exchange, the TLS_CHACHA20_POLY1305_SHA256
+## cipher suite, and ECDSA-P256 certificate authentication against a pinned issuer.
+## It performs exactly the flight needed to reach a server like OpenRouter and then
+## carries application data. Not a general TLS stack: one group, one suite, one
+## signature algorithm, no resumption, no client certificates.
+import net
+import c
+import io
+import os
+import crypto_native as crypto
+import luce_tls.tls as tls
+import luce_tls.x509 as x509
+
+pub let invalid = crypto.invalid
+
+## The established keys for an active session's application-data records.
+pub struct Secrets:
+    var client_key: u8[32]
+    var client_iv: u8[12]
+    var server_key: u8[32]
+    var server_iv: u8[12]
+    var client_seq: u64
+    var server_seq: u64
+
+    pub func init():
+        let z32: u8[32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let z12: u8[12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.client_key = z32
+        self.server_key = z32
+        self.client_iv = z12
+        self.server_iv = z12
+        self.client_seq = 0
+        self.server_seq = 0
+
+func put_u8(buf: u8[], pos: usize*, v: u8):
+    buf[*pos] = v
+    *pos += 1
+
+func put_u16(buf: u8[], pos: usize*, v: u32):
+    buf[*pos] = (u8)((v >> 8) & 0xff)
+    buf[*pos + 1] = (u8)(v & 0xff)
+    *pos += 2
+
+func put_bytes(buf: u8[], pos: usize*, src: const u8[], count: usize):
+    for i in 0..<count:
+        buf[*pos + i] = src[i]
+    *pos += count
+
+func read_exact_at(conn: net.Connection*, buf: u8[], offset: usize, count: usize) -> !:
+    var got: usize = 0
+    while got < count:
+        let n = try conn.read(buf[offset + got..<offset + count])
+        if n == 0:
+            error(invalid, "the peer closed the connection")
+        got += n
+
+func record_length(record: const u8[]) -> usize:
+    return ((usize)record[3] << 8) | (usize)record[4]
+
+## Read one record header + body into `record`; the body lands at `record[5..]`.
+func read_record(conn: net.Connection*, record: u8[]) -> !:
+    try read_exact_at(conn, record, 0, 5)
+    let length = record_length(record)
+    if length == 0 or 5 + length > record.length:
+        error(invalid, "invalid TLS record length")
+    try read_exact_at(conn, record, 5, length)
+
+## The AEAD nonce: the write IV with the sequence number XORed into its low 8 bytes.
+func make_nonce(iv: const u8[], seq: u64, nonce: u8[]):
+    for i in 0..<12:
+        nonce[i] = iv[i]
+    for i in 0..<8:
+        let shift = (u32)(56 - 8 * i)
+        nonce[4 + i] = iv[4 + i] ^ (u8)((seq >> shift) & 0xff)
+
+func send_record(conn: net.Connection*, kind: u8, payload: const u8[], length: usize) -> !:
+    var header: u8[5]
+    header[0] = kind
+    header[1] = 0x03
+    header[2] = 0x03
+    header[3] = (u8)((length >> 8) & 0xff)
+    header[4] = (u8)(length & 0xff)
+    try io.write_all(conn, header)
+    try io.write_all(conn, payload[..<length])
+
+## Encrypt `payload` (inner content type `inner`) under `key`/`iv`/`seq` and send it
+## as an application_data record. `seq` is advanced.
+func send_encrypted(conn: net.Connection*, key: const u8[], iv: const u8[], seq: u64*, inner: u8, payload: const u8[], length: usize) -> !:
+    var record: u8[16640]
+    var plain: u8[16512]
+    for i in 0..<length:
+        plain[i] = payload[i]
+    plain[length] = inner
+    let plen = length + 1
+    let clen = plen + 16
+    record[0] = 0x17
+    record[1] = 0x03
+    record[2] = 0x03
+    record[3] = (u8)((clen >> 8) & 0xff)
+    record[4] = (u8)(clen & 0xff)
+    var nonce: u8[12]
+    make_nonce(iv, *seq, nonce)
+    var tag: u8[16]
+    try crypto.aead_seal(key, nonce, record[..<5], plain[..<plen], record[5..<5 + plen], tag)
+    for i in 0..<16:
+        record[5 + plen + (usize)i] = tag[i]
+    *seq += 1
+    try io.write_all(conn, record[..<5 + clen])
+
+## Decrypt an application_data record, returning the inner content type and the
+## plaintext length (plaintext written to `out`).
+func decrypt_record(key: const u8[], iv: const u8[], seq: u64, record: const u8[], length: usize, out: u8[], inner: u8*, plen: usize*) -> !:
+    if length < 17:
+        error(invalid, "AEAD record too short")
+    var nonce: u8[12]
+    make_nonce(iv, seq, nonce)
+    let clen = length - 16
+    var tag: u8[16]
+    for i in 0..<16:
+        tag[i] = record[5 + clen + (usize)i]
+    try crypto.aead_open(key, nonce, record[..<5], record[5..<5 + clen], tag, out[..<clen])
+    var end = clen
+    while end > 0 and out[end - 1] == 0:
+        end -= 1
+    if end == 0:
+        error(invalid, "decrypted record has no content type")
+    *inner = out[end - 1]
+    *plen = end - 1
+
+func hkdf_extract(salt: const u8[], ikm: const u8[], out: u8[]) -> !:
+    discard(try crypto.hkdf_extract(ikm, salt, out))
+
+func expand_empty(secret: const u8[], label: const u8[], out: u8[]) -> !:
+    var dummy: u8[1]
+    try tls.expand_label(secret, label, dummy[0..<0], out)
+
+func traffic_keys(secret: const u8[], key: u8[], iv: u8[]) -> !:
+    try expand_empty(secret, b"key", key)
+    try expand_empty(secret, b"iv", iv)
+
+func snapshot(state: crypto.Hash*, out: u8[]) -> !:
+    var clone = *state
+    discard(try clone.digest(out))
+
+## Connect to `host`:`port` and complete a TLS 1.3 handshake, trusting a leaf
+## certificate only when it is signed by the pinned issuer key and matches `host`.
+## Returns the connected socket; `secrets` receives the application-data keys.
+pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[], secrets: Secrets*) -> net.Connection!:
+    var host_c: u8[256]
+    if host.length + 1 > host_c.length:
+        error(invalid, "host name too long")
+    for i in 0..<host.length:
+        host_c[i] = host.bytes[i]
+    host_c[host.length] = 0
+    let address = try net.resolve((c.str)(str)host_c[..<host.length], port)
+    var conn = try net.Connection.connect(address)
+    var priv: u8[32]
+    try os.random_bytes(priv)
+    var pub_key: u8[32]
+    try crypto.x25519_base(pub_key, priv)
+    var client_random: u8[32]
+    try os.random_bytes(client_random)
+    var session_id: u8[32]
+    try os.random_bytes(session_id)
+    # ClientHello body.
+    var body: u8[512]
+    var pos: usize = 0
+    put_u16(body, &pos, 0x0303)
+    put_bytes(body, &pos, client_random, 32)
+    put_u8(body, &pos, 32)
+    put_bytes(body, &pos, session_id, 32)
+    put_u16(body, &pos, 2)
+    put_u8(body, &pos, 0x13)
+    put_u8(body, &pos, 0x03)
+    put_u8(body, &pos, 1)
+    put_u8(body, &pos, 0)
+    let ext_len_at = pos
+    pos += 2
+    let ext_start = pos
+    put_u16(body, &pos, 0x002b)          # supported_versions
+    put_u16(body, &pos, 3)
+    put_u8(body, &pos, 2)
+    put_u16(body, &pos, 0x0304)
+    put_u16(body, &pos, 0x000a)          # supported_groups: x25519
+    put_u16(body, &pos, 4)
+    put_u16(body, &pos, 2)
+    put_u16(body, &pos, 0x001d)
+    put_u16(body, &pos, 0x000d)          # signature_algorithms: ecdsa_secp256r1_sha256
+    put_u16(body, &pos, 4)
+    put_u16(body, &pos, 2)
+    put_u16(body, &pos, 0x0403)
+    put_u16(body, &pos, 0x0033)          # key_share: x25519
+    put_u16(body, &pos, 38)
+    put_u16(body, &pos, 36)
+    put_u16(body, &pos, 0x001d)
+    put_u16(body, &pos, 32)
+    put_bytes(body, &pos, pub_key, 32)
+    let sni_len = host.length            # server_name
+    put_u16(body, &pos, 0x0000)
+    put_u16(body, &pos, (u32)(sni_len + 5))
+    put_u16(body, &pos, (u32)(sni_len + 3))
+    put_u8(body, &pos, 0)
+    put_u16(body, &pos, (u32)sni_len)
+    put_bytes(body, &pos, host.bytes, sni_len)
+    put_u16(body, &pos, 0x0010)          # ALPN http/1.1
+    put_u16(body, &pos, 11)
+    put_u16(body, &pos, 9)
+    put_u8(body, &pos, 8)
+    put_bytes(body, &pos, b"http/1.1", 8)
+    let ext_total = pos - ext_start
+    var patch = ext_len_at
+    put_u16(body, &patch, (u32)ext_total)
+    # Wrap in a Handshake (ClientHello) message.
+    var ch: u8[600]
+    ch[0] = 1
+    ch[1] = (u8)((pos >> 16) & 0xff)
+    ch[2] = (u8)((pos >> 8) & 0xff)
+    ch[3] = (u8)(pos & 0xff)
+    for i in 0..<pos:
+        ch[4 + i] = body[i]
+    let ch_len = 4 + pos
+    var transcript = try crypto.make_hash("sha256")
+    try transcript.update(ch[..<ch_len])
+    try send_record(&conn, 22, ch[..<ch_len], ch_len)
+    # ServerHello.
+    var record: u8[16640]
+    try read_record(&conn, record)
+    if record[0] != 22:
+        error(invalid, "expected a ServerHello record")
+    let sh_len = record_length(record)
+    try transcript.update(record[5..<5 + sh_len])
+    var server_pub: u8[32]
+    try parse_server_hello(record[5..<5 + sh_len], server_pub)
+    # Handshake key schedule.
+    var shared: u8[32]
+    try crypto.x25519(shared, priv, server_pub)
+    var zeros: u8[32]
+    for i in 0..<32:
+        zeros[i] = 0
+    var early: u8[32]
+    try hkdf_extract(zeros, zeros, early)
+    var empty_hash: u8[32]
+    discard(try crypto.digest(b"", empty_hash, "sha256"))
+    var derived: u8[32]
+    try tls.expand_label(early, b"derived", empty_hash, derived)
+    var hs_secret: u8[32]
+    try hkdf_extract(derived, shared, hs_secret)
+    var th_sh: u8[32]
+    try snapshot(&transcript, th_sh)
+    var c_hs: u8[32]
+    var s_hs: u8[32]
+    try tls.expand_label(hs_secret, b"c hs traffic", th_sh, c_hs)
+    try tls.expand_label(hs_secret, b"s hs traffic", th_sh, s_hs)
+    var c_hs_key: u8[32]
+    var c_hs_iv: u8[12]
+    var s_hs_key: u8[32]
+    var s_hs_iv: u8[12]
+    try traffic_keys(c_hs, c_hs_key, c_hs_iv)
+    try traffic_keys(s_hs, s_hs_key, s_hs_iv)
+    # Server encrypted handshake flight.
+    var server_hs_seq: u64 = 0
+    var flight: u8[16640]
+    var flight_len: usize = 0
+    var leaf = x509.Certificate()
+    var leaf_der: u8[8192]
+    var leaf_der_len: usize = 0
+    var have_cert = false
+    var got_finished = false
+    while not got_finished:
+        try read_record(&conn, record)
+        let rlen = record_length(record)
+        if record[0] == 20:
+            continue
+        if record[0] != 23:
+            error(invalid, "expected an encrypted handshake record")
+        var plain: u8[16640]
+        var inner: u8
+        var plen: usize
+        try decrypt_record(s_hs_key, s_hs_iv, server_hs_seq, record, rlen, plain, &inner, &plen)
+        server_hs_seq += 1
+        if inner != 22:
+            continue
+        for i in 0..<plen:
+            flight[flight_len + i] = plain[i]
+        flight_len += plen
+        var mpos: usize = 0
+        while mpos + 4 <= flight_len:
+            let mtype = flight[mpos]
+            let mlen = ((usize)flight[mpos + 1] << 16) | ((usize)flight[mpos + 2] << 8) | (usize)flight[mpos + 3]
+            if mpos + 4 + mlen > flight_len:
+                break
+            let msg_end = mpos + 4 + mlen
+            if mtype == 11:
+                try extract_leaf(flight[mpos..<msg_end], leaf_der, &leaf_der_len)
+                try x509.parse(leaf_der[..<leaf_der_len], &leaf)
+                if not (try x509.verify_signed_by(leaf_der[..<leaf_der_len], &leaf, issuer_x, issuer_y)):
+                    error(invalid, "leaf certificate is not signed by the pinned issuer")
+                if not (try x509.matches_host(leaf_der[..<leaf_der_len], &leaf, host)):
+                    error(invalid, "certificate does not match the host name")
+                have_cert = true
+                try transcript.update(flight[mpos..<msg_end])
+            elif mtype == 15:
+                if not have_cert:
+                    error(invalid, "CertificateVerify before Certificate")
+                var th_cert: u8[32]
+                try snapshot(&transcript, th_cert)
+                try verify_cert_verify(flight[mpos..<msg_end], &leaf, th_cert)
+                try transcript.update(flight[mpos..<msg_end])
+            elif mtype == 20:
+                var th_cv: u8[32]
+                try snapshot(&transcript, th_cv)
+                try verify_finished(flight[mpos..<msg_end], s_hs, th_cv)
+                try transcript.update(flight[mpos..<msg_end])
+                got_finished = true
+                mpos = msg_end
+                break
+            else:
+                try transcript.update(flight[mpos..<msg_end])
+            mpos = msg_end
+        if mpos > 0:
+            let remaining = flight_len - mpos
+            for k in 0..<remaining:
+                flight[k] = flight[mpos + k]
+            flight_len = remaining
+    # Application traffic secrets.
+    var th_fin: u8[32]
+    try snapshot(&transcript, th_fin)
+    var derived2: u8[32]
+    try tls.expand_label(hs_secret, b"derived", empty_hash, derived2)
+    var master: u8[32]
+    try hkdf_extract(derived2, zeros, master)
+    var c_ap: u8[32]
+    var s_ap: u8[32]
+    try tls.expand_label(master, b"c ap traffic", th_fin, c_ap)
+    try tls.expand_label(master, b"s ap traffic", th_fin, s_ap)
+    # Client Finished, still under the handshake key.
+    var c_fin_key: u8[32]
+    try expand_empty(c_hs, b"finished", c_fin_key)
+    var verify_data: u8[32]
+    discard(try crypto.authenticate(c_fin_key, th_fin, verify_data, "sha256"))
+    var fin_msg: u8[36]
+    fin_msg[0] = 20
+    fin_msg[1] = 0
+    fin_msg[2] = 0
+    fin_msg[3] = 32
+    for i in 0..<32:
+        fin_msg[4 + i] = verify_data[i]
+    var ccs: u8[1]
+    ccs[0] = 1
+    try send_record(&conn, 20, ccs, 1)
+    var client_hs_seq: u64 = 0
+    try send_encrypted(&conn, c_hs_key, c_hs_iv, &client_hs_seq, 22, fin_msg, 36)
+    # Publish application-data keys.
+    try traffic_keys(c_ap, secrets.client_key, secrets.client_iv)
+    try traffic_keys(s_ap, secrets.server_key, secrets.server_iv)
+    secrets.client_seq = 0
+    secrets.server_seq = 0
+    return conn
+
+func parse_server_hello(sh: const u8[], server_pub: u8[]) -> !:
+    if sh.length < 4 or sh[0] != 2:
+        error(invalid, "not a ServerHello")
+    var pos: usize = 4
+    pos += 2
+    pos += 32
+    let sid_len = (usize)sh[pos]
+    pos += 1 + sid_len
+    pos += 2
+    pos += 1
+    let ext_len = ((usize)sh[pos] << 8) | (usize)sh[pos + 1]
+    pos += 2
+    let ext_end = pos + ext_len
+    while pos + 4 <= ext_end:
+        let etype = ((usize)sh[pos] << 8) | (usize)sh[pos + 1]
+        let elen = ((usize)sh[pos + 2] << 8) | (usize)sh[pos + 3]
+        pos += 4
+        if etype == 0x0033:
+            let klen = ((usize)sh[pos + 2] << 8) | (usize)sh[pos + 3]
+            if klen != 32:
+                error(invalid, "unexpected key_share length")
+            for i in 0..<32:
+                server_pub[i] = sh[pos + 4 + (usize)i]
+            return
+        pos += elen
+    error(invalid, "ServerHello has no x25519 key_share")
+
+func extract_leaf(msg: const u8[], der_out: u8[], der_len: usize*) -> !:
+    var pos: usize = 4
+    let ctx_len = (usize)msg[pos]
+    pos += 1 + ctx_len
+    pos += 3
+    let cert_len = ((usize)msg[pos] << 16) | ((usize)msg[pos + 1] << 8) | (usize)msg[pos + 2]
+    pos += 3
+    if cert_len > der_out.length:
+        error(invalid, "certificate is larger than the buffer")
+    for i in 0..<cert_len:
+        der_out[i] = msg[pos + i]
+    *der_len = cert_len
+
+func verify_cert_verify(msg: const u8[], leaf: x509.Certificate*, transcript_hash: const u8[]) -> !:
+    let scheme = ((usize)msg[4] << 8) | (usize)msg[5]
+    if scheme != 0x0403:
+        error(invalid, "unsupported CertificateVerify signature scheme")
+    let sig_len = ((usize)msg[6] << 8) | (usize)msg[7]
+    var r: u8[32]
+    var s: u8[32]
+    try parse_ecdsa_sig(msg[8..<8 + sig_len], r, s)
+    var signed: u8[130]
+    for i in 0..<64:
+        signed[i] = 0x20
+    let ctx = b"TLS 1.3, server CertificateVerify"
+    for i in 0..<ctx.length:
+        signed[64 + i] = ctx[i]
+    signed[64 + ctx.length] = 0
+    var at = 64 + ctx.length + 1
+    for i in 0..<32:
+        signed[at + (usize)i] = transcript_hash[i]
+    at += 32
+    var digest: u8[32]
+    discard(try crypto.digest(signed[..<at], digest, "sha256"))
+    if not (try crypto.ecdsa_p256_verify(leaf.key_x, leaf.key_y, digest, r, s)):
+        error(invalid, "CertificateVerify signature is invalid")
+
+func parse_ecdsa_sig(sig: const u8[], r: u8[], s: u8[]) -> !:
+    if sig[0] != 0x30:
+        error(invalid, "ECDSA signature is not a SEQUENCE")
+    var pos: usize = 2
+    if sig[pos] != 0x02:
+        error(invalid, "ECDSA r is not an INTEGER")
+    let rlen = (usize)sig[pos + 1]
+    try int_to_32(sig, pos + 2, rlen, r)
+    pos += 2 + rlen
+    if sig[pos] != 0x02:
+        error(invalid, "ECDSA s is not an INTEGER")
+    let slen = (usize)sig[pos + 1]
+    try int_to_32(sig, pos + 2, slen, s)
+
+func int_to_32(buf: const u8[], content: usize, length: usize, out: u8[]) -> !:
+    var start = content
+    var len = length
+    while len > 0 and buf[start] == 0:
+        start += 1
+        len -= 1
+    if len > 32:
+        error(invalid, "ECDSA integer too large")
+    for i in 0..<32:
+        out[i] = 0
+    let lead = 32 - len
+    for i in 0..<len:
+        out[lead + i] = buf[start + i]
+
+func verify_finished(msg: const u8[], server_secret: const u8[], transcript_hash: const u8[]) -> !:
+    var fin_key: u8[32]
+    try expand_empty(server_secret, b"finished", fin_key)
+    var expected: u8[32]
+    discard(try crypto.authenticate(fin_key, transcript_hash, expected, "sha256"))
+    if msg.length != 36:
+        error(invalid, "unexpected Finished length")
+    for i in 0..<32:
+        if msg[4 + i] != expected[i]:
+            error(invalid, "server Finished did not verify")
+
+pub func send(conn: net.Connection*, secrets: Secrets*, data: const u8[]) -> !:
+    try send_encrypted(conn, secrets.client_key, secrets.client_iv, &secrets.client_seq, 23, data, data.length)
+
+## Receive one record's worth of application data into `out` (which must be at
+## least 16640 bytes), returning the number of bytes written; 0 at end of stream.
+pub func receive(conn: net.Connection*, secrets: Secrets*, out: u8[]) -> usize!:
+    var record: u8[16640]
+    while true:
+        try read_record(conn, record)
+        let rlen = record_length(record)
+        if record[0] == 20:
+            continue
+        if record[0] != 23:
+            error(invalid, "unexpected record during application data")
+        var plain: u8[16640]
+        var inner: u8
+        var plen: usize
+        try decrypt_record(secrets.server_key, secrets.server_iv, secrets.server_seq, record, rlen, plain, &inner, &plen)
+        secrets.server_seq += 1
+        if inner == 21:
+            return 0
+        if inner != 23:
+            continue
+        if plen > out.length:
+            error(invalid, "application record larger than the receive buffer")
+        for i in 0..<plen:
+            out[i] = plain[i]
+        return plen
+    return 0
