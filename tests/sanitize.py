@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Instrument generated Base C; does not replace native-mode tests."""
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -7,12 +8,16 @@ from run import ROOT, SOURCES
 
 
 def main():
-    base = ROOT / "build/toolchain/luce-base"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", type=Path, default=ROOT / "build/toolchain/luce-base")
+    base = parser.parse_args().base
     runtime = ROOT.parent / "luce-base/runtime"
     output = ROOT / "build/sanitize"
     output.mkdir(parents=True, exist_ok=True)
     os.environ["ASAN_OPTIONS"] = "halt_on_error=1:abort_on_error=1"
     os.environ["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
+    os.environ.setdefault("LUCE_STD", str(ROOT.parent / "luce-base/src/std"))
+    os.environ.setdefault("LUCE_CACHE", str(ROOT / "build/cache"))
     def run(command):
         subprocess.run([str(a) for a in command], cwd=ROOT, check=True, timeout=180)
     for source, name in SOURCES:

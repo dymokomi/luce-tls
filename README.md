@@ -14,3 +14,11 @@ python3 tools/bootstrap.py
 python3 tests/run.py
 python3 tests/sanitize.py
 ```
+
+Bootstrap verifies the sibling compiler/crypto revisions in `bootstrap/` and
+builds tools inside this package. Both test runners accept `--base PATH` for an
+existing compiler. Caches default to `build/cache` (`LUCE_CACHE` may override).
+The matrix exercises native optimization levels 0–3 and C debug/release, including
+a real loopback client/server exchange; sanitizer checks cover generated C and
+the runtime. These checks do not establish external TLS interoperability,
+certificate-policy completeness, leak freedom or side-channel safety.
