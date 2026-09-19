@@ -1,0 +1,260 @@
+## A minimal X.509 (DER) reader for the certificates this client meets: it extracts
+## the signed TBS bytes, the ECDSA signature, the subject EC public key, the
+## SubjectAltName DNS entries, and the validity window. It validates a certificate
+## against an already-trusted issuer key (ECDSA-P256 over SHA-256) and matches a
+## hostname; it is not a general X.509 path builder.
+import crypto_native
+from luce_tls.tls import hostname_matches
+
+pub let invalid = crypto_native.invalid
+
+pub struct Certificate:
+    var tbs_off: usize
+    var tbs_len: usize
+    var sig_r: u8[32]
+    var sig_s: u8[32]
+    var key_x: u8[32]
+    var key_y: u8[32]
+    var san_off: usize
+    var san_len: usize
+    var not_before: i64
+    var not_after: i64
+
+    pub func init():
+        let zero: u8[32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.tbs_off = 0
+        self.tbs_len = 0
+        self.san_off = 0
+        self.san_len = 0
+        self.not_before = 0
+        self.not_after = 0
+        self.sig_r = zero
+        self.sig_s = zero
+        self.key_x = zero
+        self.key_y = zero
+
+## Read one DER TLV at `pos`, reporting the tag, the content range and the
+## position just past the element. Lengths use at most four bytes.
+func read_tlv(der: const u8[], pos: usize, tag: u8*, content: usize*, length: usize*, next: usize*) -> !:
+    if pos + 2 > der.length:
+        error(invalid, "truncated DER element")
+    *tag = der[pos]
+    let first = der[pos + 1]
+    var len: usize = 0
+    var header: usize = 2
+    if first < 0x80:
+        len = (usize)first
+    else:
+        let count = (usize)(first & 0x7f)
+        if count == 0 or count > 4 or pos + 2 + count > der.length:
+            error(invalid, "unsupported DER length")
+        for k in 0..<count:
+            len = (len << 8) | (usize)der[pos + 2 + k]
+        header = 2 + count
+    if pos + header + len > der.length:
+        error(invalid, "DER length runs past the buffer")
+    *content = pos + header
+    *length = len
+    *next = pos + header + len
+
+func expect(der: const u8[], pos: usize, want: u8, content: usize*, length: usize*, next: usize*) -> !:
+    var tag: u8
+    try read_tlv(der, pos, &tag, content, length, next)
+    if tag != want:
+        error(invalid, "unexpected DER tag")
+
+## Right-align a DER INTEGER (dropping a leading sign byte) into 32 big-endian bytes.
+func integer_to_32(der: const u8[], content: usize, length: usize, out: u8[]) -> !:
+    var start = content
+    var len = length
+    while len > 0 and der[start] == 0:
+        start += 1
+        len -= 1
+    if len > 32:
+        error(invalid, "integer too large for P-256")
+    for i in 0..<32:
+        out[i] = 0
+    let lead = 32 - len
+    for i in 0..<len:
+        out[lead + i] = der[start + i]
+
+func digits2(der: const u8[], at: usize) -> i64:
+    return (i64)(der[at] - 48) * 10 + (i64)(der[at + 1] - 48)
+
+## Parse a UTCTime or GeneralizedTime into a sortable YYYYMMDDHHMMSS integer.
+func parse_time(der: const u8[], tag: u8, content: usize, length: usize) -> i64!:
+    var at = content
+    var year: i64 = 0
+    if tag == 0x17:
+        let yy = digits2(der, at)
+        year = (1900 + yy) if yy >= 50 else (2000 + yy)
+        at += 2
+    elif tag == 0x18:
+        year = digits2(der, at) * 100 + digits2(der, at + 2)
+        at += 4
+    else:
+        error(invalid, "unsupported time encoding")
+    let month = digits2(der, at)
+    let day = digits2(der, at + 2)
+    let hour = digits2(der, at + 4)
+    let minute = digits2(der, at + 6)
+    let second = digits2(der, at + 8)
+    return ((((year * 100 + month) * 100 + day) * 100 + hour) * 100 + minute) * 100 + second
+
+## Parse a certificate's DER, filling `cert` with what this client needs.
+pub func parse(der: const u8[], cert: Certificate*) -> !:
+    var content: usize
+    var length: usize
+    var next: usize
+    try expect(der, 0, 0x30, &content, &length, &next)
+    let outer = content
+    # tbsCertificate — the signed bytes are this whole element.
+    var tag: u8
+    var tbs_content: usize
+    var tbs_len: usize
+    var after_tbs: usize
+    try read_tlv(der, outer, &tag, &tbs_content, &tbs_len, &after_tbs)
+    if tag != 0x30:
+        error(invalid, "tbsCertificate is not a SEQUENCE")
+    cert.tbs_off = outer
+    cert.tbs_len = after_tbs - outer
+    # signatureAlgorithm, then signatureValue BIT STRING.
+    var alg_c: usize
+    var alg_l: usize
+    var after_alg: usize
+    try expect(der, after_tbs, 0x30, &alg_c, &alg_l, &after_alg)
+    var bit_c: usize
+    var bit_l: usize
+    var after_bit: usize
+    try expect(der, after_alg, 0x03, &bit_c, &bit_l, &after_bit)
+    # BIT STRING: skip the unused-bits byte, then an ECDSA-Sig-Value SEQUENCE.
+    var seq_c: usize
+    var seq_l: usize
+    var after_seq: usize
+    try expect(der, bit_c + 1, 0x30, &seq_c, &seq_l, &after_seq)
+    var rc: usize
+    var rl: usize
+    var after_r: usize
+    try expect(der, seq_c, 0x02, &rc, &rl, &after_r)
+    var sc: usize
+    var sl: usize
+    var after_s: usize
+    try expect(der, after_r, 0x02, &sc, &sl, &after_s)
+    try integer_to_32(der, rc, rl, cert.sig_r)
+    try integer_to_32(der, sc, sl, cert.sig_s)
+    # Walk the TBS fields.
+    var pos = tbs_content
+    try read_tlv(der, pos, &tag, &content, &length, &next)
+    if tag == 0xa0:
+        pos = next                                  # skip version
+    try expect(der, pos, 0x02, &content, &length, &next)   # serialNumber
+    pos = next
+    try expect(der, pos, 0x30, &content, &length, &next)   # signature alg
+    pos = next
+    try expect(der, pos, 0x30, &content, &length, &next)   # issuer
+    pos = next
+    # validity
+    var val_c: usize
+    var val_l: usize
+    var after_val: usize
+    try expect(der, pos, 0x30, &val_c, &val_l, &after_val)
+    var t_c: usize
+    var t_l: usize
+    var t_n: usize
+    try read_tlv(der, val_c, &tag, &t_c, &t_l, &t_n)
+    cert.not_before = try parse_time(der, tag, t_c, t_l)
+    try read_tlv(der, t_n, &tag, &t_c, &t_l, &t_n)
+    cert.not_after = try parse_time(der, tag, t_c, t_l)
+    pos = after_val
+    try expect(der, pos, 0x30, &content, &length, &next)   # subject
+    pos = next
+    # subjectPublicKeyInfo
+    var spki_c: usize
+    var spki_l: usize
+    var after_spki: usize
+    try expect(der, pos, 0x30, &spki_c, &spki_l, &after_spki)
+    var spki_alg_c: usize
+    var spki_alg_l: usize
+    var after_spki_alg: usize
+    try expect(der, spki_c, 0x30, &spki_alg_c, &spki_alg_l, &after_spki_alg)
+    var pk_c: usize
+    var pk_l: usize
+    var after_pk: usize
+    try expect(der, after_spki_alg, 0x03, &pk_c, &pk_l, &after_pk)
+    # BIT STRING: unused-bits byte, then 0x04 || X || Y.
+    if pk_l < 66 or der[pk_c] != 0 or der[pk_c + 1] != 4:
+        error(invalid, "unexpected EC public key encoding")
+    for i in 0..<32:
+        cert.key_x[i] = der[pk_c + 2 + (usize)i]
+        cert.key_y[i] = der[pk_c + 34 + (usize)i]
+    pos = after_spki
+    cert.san_off = 0
+    cert.san_len = 0
+    # Optional uniqueIDs then extensions [3].
+    while pos < after_tbs:
+        try read_tlv(der, pos, &tag, &content, &length, &next)
+        if tag == 0xa3:
+            try find_san(der, content, content + length, cert)
+        pos = next
+
+## Scan the extensions SEQUENCE for SubjectAltName (2.5.29.17) and record its value.
+func find_san(der: const u8[], start: usize, end: usize, cert: Certificate*) -> !:
+    var tag: u8
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, start, 0x30, &seq_c, &seq_l, &seq_n)
+    var pos = seq_c
+    let limit = seq_c + seq_l
+    while pos < limit:
+        var ext_c: usize
+        var ext_l: usize
+        var ext_n: usize
+        try expect(der, pos, 0x30, &ext_c, &ext_l, &ext_n)
+        var oid_c: usize
+        var oid_l: usize
+        var after_oid: usize
+        try expect(der, ext_c, 0x06, &oid_c, &oid_l, &after_oid)
+        if oid_l == 3 and der[oid_c] == 0x55 and der[oid_c + 1] == 0x1d and der[oid_c + 2] == 0x11:
+            var v_c: usize
+            var v_l: usize
+            var v_n: usize
+            try read_tlv(der, after_oid, &tag, &v_c, &v_l, &v_n)
+            if tag == 0x01:                     # skip optional critical BOOLEAN
+                try expect(der, v_n, 0x04, &v_c, &v_l, &v_n)
+            elif tag != 0x04:
+                error(invalid, "SAN extnValue is not an OCTET STRING")
+            # extnValue OCTET STRING wraps a SEQUENCE OF GeneralName.
+            var g_c: usize
+            var g_l: usize
+            var g_n: usize
+            try expect(der, v_c, 0x30, &g_c, &g_l, &g_n)
+            cert.san_off = g_c
+            cert.san_len = g_l
+        pos = ext_n
+
+## Whether any SAN dNSName matches `host` (exact or a single leftmost wildcard).
+pub func matches_host(der: const u8[], cert: Certificate*, host: str) -> bool!:
+    if cert.san_len == 0:
+        return false
+    var pos = cert.san_off
+    let limit = cert.san_off + cert.san_len
+    while pos < limit:
+        var tag: u8
+        var c: usize
+        var l: usize
+        var n: usize
+        try read_tlv(der, pos, &tag, &c, &l, &n)
+        if tag == 0x82:                          # dNSName [2] IA5String
+            let name = (str)der[c..<c + l]
+            if hostname_matches(name, host):
+                return true
+        pos = n
+    return false
+
+## Verify this certificate's ECDSA-P256 signature under the given issuer key, i.e.
+## that a trusted issuer signed its TBS bytes.
+pub func verify_signed_by(der: const u8[], cert: Certificate*, issuer_x: const u8[], issuer_y: const u8[]) -> bool!:
+    var digest: u8[32]
+    discard(try crypto_native.digest(der[cert.tbs_off..<cert.tbs_off + cert.tbs_len], digest, "sha256"))
+    return try crypto_native.ecdsa_p256_verify(issuer_x, issuer_y, digest, cert.sig_r, cert.sig_s)
