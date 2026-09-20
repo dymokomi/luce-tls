@@ -1,0 +1,152 @@
+## The exact public certificate path served by the existing Lucia OS Caddy VPS
+## on 2026-09-19. The leaf is intentionally checked at a fixed instant inside
+## its validity interval so this regression remains deterministic.
+import luce_tls.chain as chain
+
+let leaf_b64 = b"MIIDhzCCAw2gAwIBAgISBrXrC9fGRoHRRpb9ZWQZ70PRMAoGCCqGSM49BAMDMDMxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTIwHhcNMjYwODE3MTEyODI4WhcNMjYxMTE1MTEyODI3WjAXMRUwEwYDVQQDEwxraW5vZ2FraS5jb20wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAS+QxSgLLPiu6Cg4LXl2KTrt4/8BQJ+pS7tspOF53Cdwln14jguHhtkTR4LQO+X29YlSo1BFzQI8ArudSqQkIq7o4ICGzCCAhcwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFFBgCA/pAzp5WwI0n1HSXuknTKABMB8GA1UdIwQYMBaAFLlZ8o7PIvCG0zdI/3YUGLqC2FWHMDMGCCsGAQUFBwEBBCcwJTAjBggrBgEFBQcwAoYXaHR0cDovL3llMi5pLmxlbmNyLm9yZy8wFwYDVR0RBBAwDoIMa2lub2dha2kuY29tMBMGA1UdIAQMMAowCAYGZ4EMAQIBMC4GA1UdHwQnMCUwI6AhoB+GHWh0dHA6Ly95ZTIuYy5sZW5jci5vcmcvODIuY3JsMIIBDQYKKwYBBAHWeQIEAgSB/gSB+wD5AHYAyKPEf8ezrbk1awE/anoSbeM6TkOlxkb5l605dZkdz5oAAAGgD7B6WwAABAMARzBFAiASHXOCDjFTXU+19AiseDRcAzmUemEhhq9hN4IO72Z5SwIhALA4+gIW74uhjBxgb5Zy3L51X9mSC+2gVMiPnJ2arLlCAH8ARq+GPTs+5Z+ld96oJF02sNntIqIj9GF3QSKUUu6VUF8AAAGgD7B60AAIAAAFABTn4xUEAwBIMEYCIQDKITcVq4ym5+5BIlChMFnbSBpShUZT55qS/jTCSGW1+gIhALVjMXRq2pp8Raf2C6KCNjlSbVo39s8TXUedZ0o5sMgXMAoGCCqGSM49BAMDA2gAMGUCMQD+Amm7TI2XQtxsi0XkgxVULRibXffXNWe0Q+yl8d8Ccsn+h/LHzL1KfGqOlpD3JHcCMB3Na9EHYnod4j+82qTT1S09YTtoNW24niwe2BMc4/AT02IHbjvGlEWCqWukZwbznQ=="
+let ye2_b64 = b"MIICjDCCAhGgAwIBAgIQTfOxXdbAeExQfNN7WObxFTAKBggqhkjOPQQDAzAuMQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTAeFw0yNTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTIwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAARxmrQzkdbEEL3MqXt3dJQttYc47axkdDTHud5TPqM2z5uSD5cmk0WrHlWXvnlvqBLqiB34kluxIbmMyAiq3/YD6e80/vV259K8XQIdjFXloYOa0mIU71f7HQ09PvYDlw+jge4wgeswDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFLlZ8o7PIvCG0zdI/3YUGLqC2FWHMB8GA1UdIwQYMBaAFKPIJlqOoUzQNWP8myPIOq5W809WMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEFBQcwAoYWaHR0cDovL3llLmkubGVuY3Iub3JnLzATBgNVHSAEDDAKMAgGBmeBDAECATAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veWUuYy5sZW5jci5vcmcvMAoGCCqGSM49BAMDA2kAMGYCMQDIcnw5dcZLN9ffynXnnkLD/itSJEycJPb3sRkzeqBowup7vOsAwaqoCnNn/jh9wycCMQCJM6CPlaOC4pQYYbJtVPYbDKrIb2EKk5NpOpE6/XttQYZV/3gilB9l+Cc/DOVwmyg="
+let root_ye_b64 = b"MIICpjCCAiugAwIBAgIRAIchZfw0tuX7qK3Vs3BftTowCgYIKoZIzj0EAwMwTzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDIwHhcNMjYwNTEzMDAwMDAwWhcNMzIwOTAyMjM1OTU5WjAuMQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTB2MBAGByqGSM49AgEGBSuBBAAiA2IABDwS/6vhrcVqcbBo+wgdI3fwn9x7DNJJOY/lTOti0vkwuRN87RhEhTH17E7XyFjWsPYhIPt/wzOqxTd2b+4ZJNy9ID04YywF9U5zasDVyGSNErVNtz8uSGh5izW87j77GaOB6zCB6DAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUo8gmWo6hTNA1Y/ybI8g6rlbzT1YwHwYDVR0jBBgwFoAUfEKWrt5LSDv6kviejM9ti6lyN5UwMgYIKwYBBQUHAQEEJjAkMCIGCCsGAQUFBzAChhZodHRwOi8veDIuaS5sZW5jci5vcmcvMBMGA1UdIAQMMAowCAYGZ4EMAQIBMCcGA1UdHwQgMB4wHKAaoBiGFmh0dHA6Ly94Mi5jLmxlbmNyLm9yZy8wCgYIKoZIzj0EAwMDaQAwZgIxAMU19WCtmxVND8UHBZRoma49Z7jPs64Dma0eTu1OChVbB/2J7GV3nvYKAx54uk1G9QIxAO0miLVJu8PLNiXXXkiE/gsK3CTRTF/aeo4bMX42Zw40csRU6AC26hSW1/IWaas6dg=="
+let x2_cross_b64 = b"MIIEcDCCAligAwIBAgIQbI8dxyfHEX97r4U6yYD5zTANBgkqhkiG9w0BAQsFADBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMTAeFw0yNjA1MTMwMDAwMDBaFw0zMjA5MDIyMzU5NTlaME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBTZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEzZvVn4CDCuwJSvMWSj5cz3es3mcFDR0HttwW+1qLFNvicWDEukWVEYmO6gbf9yoWHKS5xcUy4APgHoIYOIvXRdgKam7mAHf7AlF9ItgKbppbd9/w+kHsOdx1ymgHDB/qo4H1MIHyMA4GA1UdDwEB/wQEAwIBBjAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUfEKWrt5LSDv6kviejM9ti6lyN5UwHwYDVR0jBBgwFoAUebRZ5nu25eQBc4AIiMgaWPbpm24wMgYIKwYBBQUHAQEEJjAkMCIGCCsGAQUFBzAChhZodHRwOi8veDEuaS5sZW5jci5vcmcvMBMGA1UdIAQMMAowCAYGZ4EMAQIBMCcGA1UdHwQgMB4wHKAaoBiGFmh0dHA6Ly94MS5jLmxlbmNyLm9yZy8wDQYJKoZIhvcNAQELBQADggIBAD2/e9frmMxNpCV03qUHegg+MV2wz9644YoXdqtH8RyWYcBO7xfjjGEXdU1e/o0OkEFiynUCOSIk/vLLo7ttz6CPAeNlWfC0XNkoGeWgK6jjXvozBaGuGH5n0UfoshMeWTuURqNN5G00sSXDTBrpp2+mgvdZQjb8K11TYMA25QA+YHNfbIEL0BniAhKS2gsnJjSzrdZLI+EZ7SEyqdR2rkjd1KutLDU+n3TFyxjniZVGur4YlhMP3mY/dV95IruAkkjOZier6hGBdEgZXXvaCz9u9iVEadsIE75pAGL8oHV5vxdARDiotRpul1IN/UZwzAbrfUFcw1HkAcYD/mlZfnQ2ieCF2MS7j3Vhv7JPDKp45fmykmzYNSrumRW0upFFKDBOoF7hsOb7oLyHS+Uft6jOUfOrogj8YUx38hKb2K20r42OgsSdDdxdeYWcMS3Sb6mwJeSZEYxJ2gaXnDSPaKhhrNkYwljyVQyr4Nq+MEJytXNTnHqaAcrNwZlVpcJL1KBnMrMjP7eanvUwL3FYj3cF17jtboLt7gLoi4+2rWZFvn+w54jmd/FIuhhZcEaU/wvU6BUNMtcVquVGHp7itQeDth5j+XL3j4WJ2SABwzUl6OeYdgpIt/ITZa+pTT0mQ/r5XyA4MEAiabn7XJjvCERlF2dcn2wqJw+CreTkkQ2R"
+
+func b64_value(ch: u8) -> u8!:
+    if ch >= 'A' and ch <= 'Z': return ch - 'A'
+    if ch >= 'a' and ch <= 'z': return ch - 'a' + 26
+    if ch >= '0' and ch <= '9': return ch - '0' + 52
+    if ch == '+': return 62
+    if ch == '/': return 63
+    error(chain.invalid, "invalid fixture base64")
+
+func decode(input: const u8[], output: u8[]) -> usize!:
+    if input.length == 0 or input.length % 4 != 0:
+        error(chain.invalid, "invalid fixture base64 length")
+    var at: usize = 0
+    var used: usize = 0
+    while at < input.length:
+        let a = try b64_value(input[at])
+        let b = try b64_value(input[at + 1])
+        let c = 0 if input[at + 2] == '=' else try b64_value(input[at + 2])
+        let d = 0 if input[at + 3] == '=' else try b64_value(input[at + 3])
+        if used >= output.length: error(chain.invalid, "fixture output is full")
+        output[used] = (a << 2) | (b >> 4)
+        used += 1
+        if input[at + 2] != '=':
+            if used >= output.length: error(chain.invalid, "fixture output is full")
+            output[used] = (b << 4) | (c >> 2)
+            used += 1
+        if input[at + 3] != '=':
+            if input[at + 2] == '=' or used >= output.length: error(chain.invalid, "invalid fixture base64 padding")
+            output[used] = (c << 6) | d
+            used += 1
+        elif at + 4 != input.length:
+            error(chain.invalid, "fixture base64 padding is not final")
+        at += 4
+    return used
+
+func put_u24(out: u8[], at: usize*, value: usize):
+    out[*at] = (u8)(value >> 16)
+    out[*at + 1] = (u8)(value >> 8)
+    out[*at + 2] = (u8)value
+    *at += 3
+
+func append_entry(message: u8[], at: usize*, der: const u8[]):
+    put_u24(message, at, der.length)
+    for i in 0..<der.length:
+        message[*at + i] = der[i]
+    *at += der.length
+    message[*at] = 0
+    message[*at + 1] = 0
+    *at += 2
+
+func make_message(message: u8[], leaf: const u8[], ye2: const u8[], root_ye: const u8[], x2: const u8[], include_x2: bool) -> usize:
+    var at: usize = 0
+    message[at] = 11
+    at += 4
+    message[at] = 0
+    at += 1
+    let list_at = at
+    at += 3
+    let list_start = at
+    append_entry(message, &at, leaf)
+    append_entry(message, &at, ye2)
+    append_entry(message, &at, root_ye)
+    if include_x2:
+        append_entry(message, &at, x2)
+    var patch = list_at
+    put_u24(message, &patch, at - list_start)
+    patch = 1
+    put_u24(message, &patch, at - 4)
+    return at
+
+func rejected(message: const u8[], host: str, now: i64, root_x: const u8[], root_y: const u8[]) -> bool:
+    var x: u8[32]
+    var y: u8[32]
+    var failed = false
+    chain.verify_server_chain(message, host, now, root_x, root_y, x, y) catch failure:
+        discard(failure)
+        failed = true
+        recover ()
+    return failed
+
+func find_bytes(haystack: const u8[], needle: const u8[]) -> usize!:
+    if needle.length == 0 or needle.length > haystack.length:
+        error(chain.invalid, "fixture pattern is absent")
+    for at in 0..<(haystack.length - needle.length + 1):
+        var equal = true
+        for i in 0..<needle.length:
+            if haystack[at + i] != needle[i]: equal = false
+        if equal: return at
+    error(chain.invalid, "fixture pattern is absent")
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    var leaf: u8[2048]
+    var ye2: u8[2048]
+    var root_ye: u8[2048]
+    var x2: u8[2048]
+    let leaf_n = try decode(leaf_b64, leaf)
+    let ye2_n = try decode(ye2_b64, ye2)
+    let root_ye_n = try decode(root_ye_b64, root_ye)
+    let x2_n = try decode(x2_cross_b64, x2)
+    var message: u8[8192]
+    let full_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
+    var key_x: u8[32]
+    var key_y: u8[32]
+    let inside_window: i64 = 1789885378
+    try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window,
+        chain.isrg_root_x2_x, chain.isrg_root_x2_y, key_x, key_y)
+    assert(key_x[0] == 0xbe and key_y[31] == 0xbb)
+    assert(rejected(message[..<full_n], "pkg.luciaos.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(rejected(message[..<full_n], "kinogaki.com", 1700000000, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(rejected(message[..<full_n], "kinogaki.com", 1800000000, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    var wrong: u8[48]
+    for i in 0..<48: wrong[i] = chain.isrg_root_x2_x[i]
+    wrong[0] ^= 1
+    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, wrong, chain.isrg_root_x2_y))
+    # The anchor may be omitted from a TLS path; Root YE is signed directly by it.
+    let short_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], false)
+    try chain.verify_server_chain(message[..<short_n], "kinogaki.com", inside_window,
+        chain.isrg_root_x2_x, chain.isrg_root_x2_y, key_x, key_y)
+    # Mutating an authenticated leaf signature must fail.
+    leaf[leaf_n - 1] ^= 1
+    let bad_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
+    assert(rejected(message[..<bad_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    leaf[leaf_n - 1] ^= 1
+    # Reordered and duplicate certificate paths are rejected before trust.
+    let reordered_n = make_message(message, leaf[..<leaf_n], root_ye[..<root_ye_n], ye2[..<ye2_n], x2[..<x2_n], true)
+    assert(rejected(message[..<reordered_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    let duplicate_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], x2[..<x2_n], true)
+    assert(rejected(message[..<duplicate_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    # A critical extension that the validator does not understand must reject.
+    let key_usage_marker = b"\x06\x03\x55\x1d\x0f\x01\x01\xff"
+    let key_usage_at = try find_bytes(leaf[..<leaf_n], key_usage_marker)
+    leaf[key_usage_at + 4] ^= 1
+    let critical_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
+    assert(rejected(message[..<critical_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    leaf[key_usage_at + 4] ^= 1
+    # Non-empty CertificateEntry extensions were not requested by this client.
+    discard(make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true))
+    message[8 + leaf_n] = 1
+    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(rejected(message[..<full_n - 1], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    print("PASS strict P-384 public certificate-chain validation")
+    return 0

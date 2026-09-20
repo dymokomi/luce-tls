@@ -7,7 +7,7 @@ let leaf_der = b"\x30\x82\x03\xa1\x30\x82\x03\x48\xa0\x03\x02\x01\x02\x02\x10\x3
 let we1_x = b"\x6f\xcd\x3a\xfe\x67\x57\x47\x4c\x21\x03\x85\x40\xc2\x47\x5d\xbb\x58\x47\x0f\x40\xc1\x5c\x17\x85\xc6\x19\x37\xe7\xd5\x7c\xed\x86"
 let we1_y = b"\x4b\x9b\x81\xd9\xd7\x1a\x13\xa5\x0a\x03\xf8\x98\xc4\xc6\xe8\x9e\xff\x10\x59\x8f\x2c\x26\x98\xf5\xe6\x26\x25\xbb\x0f\x02\xfa\x56"
 
-test "x509 parses and validates the OpenRouter leaf against WE1":
+func test_openrouter() -> !:
     var cert = Certificate()
     try parse(leaf_der, &cert)
     assert(try matches_host(leaf_der, &cert, "openrouter.ai"))
@@ -16,7 +16,7 @@ test "x509 parses and validates the OpenRouter leaf against WE1":
     # A wrong issuer key must reject the signature.
     assert(not (try verify_signed_by(leaf_der, &cert, we1_y, we1_x)))
 
-test "x509 mints a self-signed P-256 certificate":
+func test_self_signed() -> !:
     var d: u8[32]
     var qx: u8[32]
     var qy: u8[32]
@@ -27,3 +27,10 @@ test "x509 mints a self-signed P-256 certificate":
     try parse(der[..<n], &cert)
     assert(try matches_host(der[..<n], &cert, "localhost"))
     assert(try verify_signed_by(der[..<n], &cert, qx, qy))
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    try test_openrouter()
+    try test_self_signed()
+    print("PASS pinned P-256 X.509 parsing and minting")
+    return 0

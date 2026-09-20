@@ -8,7 +8,12 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 MODES = {f"native{i}": ["--native", "--opt", str(i)] for i in range(4)}
 MODES.update({"c": ["--backend=c"], "c-release": ["--backend=c", "--release"]})
-SOURCES = [("src/luce_tls/tls_tests.lucb", "tls-tests"), ("src/luce_tls/session_tests.lucb", "session-tests")]
+SOURCES = [
+    ("src/luce_tls/tls_tests.lucb", "tls-tests"),
+    ("src/luce_tls/session_tests.lucb", "session-tests"),
+    ("src/luce_tls/x509_tests.lucb", "x509-tests"),
+    ("src/luce_tls/chain_tests.lucb", "chain-tests"),
+]
 
 
 def main():

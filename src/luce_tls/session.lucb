@@ -1,5 +1,6 @@
 ## A minimal TLS 1.3 client: X25519 key exchange, the TLS_CHACHA20_POLY1305_SHA256
-## cipher suite, and ECDSA-P256 certificate authentication against a pinned issuer.
+## cipher suite, ECDSA-P256 CertificateVerify, and either a private P-256 issuer
+## pin or a strict public path under an explicit P-384 trust anchor.
 ## It performs exactly the flight needed to reach a server like OpenRouter and then
 ## carries application data. Not a general TLS stack: one group, one suite, one
 ## signature algorithm, no resumption, no client certificates.
@@ -7,9 +8,11 @@ import net
 import c
 import io
 import os
+import time
 import crypto_native as crypto
 import luce_tls.tls as tls
 import luce_tls.x509 as x509
+import luce_tls.chain as chain
 
 pub let invalid = crypto.invalid
 
@@ -46,6 +49,12 @@ func put_bytes(buf: u8[], pos: usize*, src: const u8[], count: usize):
         buf[*pos + i] = src[i]
     *pos += count
 
+func same_bytes(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length: return false
+    for i in 0..<a.length:
+        if a[i] != b[i]: return false
+    return true
+
 func read_exact_at(conn: net.Connection*, buf: u8[], offset: usize, count: usize) -> !:
     var got: usize = 0
     while got < count:
@@ -60,6 +69,7 @@ func record_length(record: const u8[]) -> usize:
 ## Read one record header + body into `record`; the body lands at `record[5..]`.
 func read_record(conn: net.Connection*, record: u8[]) -> !:
     try read_exact_at(conn, record, 0, 5)
+    discard(try tls.parse_record(record[..<5]))
     let length = record_length(record)
     if length == 0 or 5 + length > record.length:
         error(invalid, "invalid TLS record length")
@@ -88,6 +98,8 @@ func send_record(conn: net.Connection*, kind: u8, payload: const u8[], length: u
 func send_encrypted(conn: net.Connection*, key: const u8[], iv: const u8[], seq: u64*, inner: u8, payload: const u8[], length: usize) -> !:
     var record: u8[16640]
     var plain: u8[16512]
+    if length > payload.length or length >= plain.length:
+        error(invalid, "TLS plaintext exceeds the bounded record buffer")
     for i in 0..<length:
         plain[i] = payload[i]
     plain[length] = inner
@@ -142,10 +154,24 @@ func snapshot(state: crypto.Hash*, out: u8[]) -> !:
     var clone = *state
     discard(try clone.digest(out))
 
-## Connect to `host`:`port` and complete a TLS 1.3 handshake, trusting a leaf
-## certificate only when it is signed by the pinned issuer key and matches `host`.
-## Returns the connected socket; `secrets` receives the application-data keys.
+## Legacy private-server entry point: trust one P-256 issuer key and require a
+## directly signed leaf. Public HTTPS clients should use `connect_public`.
 pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[], secrets: Secrets*) -> net.Connection!:
+    return try connect_with_trust(host, port, issuer_x, issuer_y, false, secrets)
+
+## Connect using a caller-supplied P-384 public trust anchor and a bounded,
+## fully validated X.509 chain.
+pub func connect_p384_chain(host: str, port: u16, root_x: const u8[], root_y: const u8[], secrets: Secrets*) -> net.Connection!:
+    return try connect_with_trust(host, port, root_x, root_y, true, secrets)
+
+## Public HTTPS profile used by the Lucia OS edge: the explicitly pinned ISRG
+## Root X2 P-384 key, with every served certificate below it validated.
+pub func connect_public(host: str, port: u16, secrets: Secrets*) -> net.Connection!:
+    return try connect_with_trust(host, port, chain.isrg_root_x2_x, chain.isrg_root_x2_y, true, secrets)
+
+## Complete a TLS 1.3 handshake. `public_chain` selects strict P-384-root path
+## validation; false retains the private P-256 direct-issuer profile.
+func connect_with_trust(host: str, port: u16, trust_x: const u8[], trust_y: const u8[], public_chain: bool, secrets: Secrets*) -> net.Connection!:
     var host_c: u8[256]
     if host.length + 1 > host_c.length:
         error(invalid, "host name too long")
@@ -230,7 +256,7 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
     let sh_len = record_length(record)
     try transcript.update(record[5..<5 + sh_len])
     var server_pub: u8[32]
-    try parse_server_hello(record[5..<5 + sh_len], server_pub)
+    try parse_server_hello(record[5..<5 + sh_len], session_id, server_pub)
     # Handshake key schedule.
     var shared: u8[32]
     try crypto.x25519(shared, priv, server_pub)
@@ -264,6 +290,8 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
     var leaf = x509.Certificate()
     var leaf_der: u8[8192]
     var leaf_der_len: usize = 0
+    var leaf_x: u8[32]
+    var leaf_y: u8[32]
     var have_cert = false
     var got_finished = false
     while not got_finished:
@@ -280,6 +308,8 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
         server_hs_seq += 1
         if inner != 22:
             continue
+        if plen > flight.length - flight_len:
+            error(invalid, "TLS handshake flight exceeds the bounded buffer")
         for i in 0..<plen:
             flight[flight_len + i] = plain[i]
         flight_len += plen
@@ -291,12 +321,18 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
                 break
             let msg_end = mpos + 4 + mlen
             if mtype == 11:
-                try extract_leaf(flight[mpos..<msg_end], leaf_der, &leaf_der_len)
-                try x509.parse(leaf_der[..<leaf_der_len], &leaf)
-                if not (try x509.verify_signed_by(leaf_der[..<leaf_der_len], &leaf, issuer_x, issuer_y)):
-                    error(invalid, "leaf certificate is not signed by the pinned issuer")
-                if not (try x509.matches_host(leaf_der[..<leaf_der_len], &leaf, host)):
-                    error(invalid, "certificate does not match the host name")
+                if public_chain:
+                    try chain.verify_server_chain(flight[mpos..<msg_end], host, time.unix(), trust_x, trust_y, leaf_x, leaf_y)
+                else:
+                    try extract_leaf(flight[mpos..<msg_end], leaf_der, &leaf_der_len)
+                    try x509.parse(leaf_der[..<leaf_der_len], &leaf)
+                    if not (try x509.verify_signed_by(leaf_der[..<leaf_der_len], &leaf, trust_x, trust_y)):
+                        error(invalid, "leaf certificate is not signed by the pinned issuer")
+                    if not (try x509.matches_host(leaf_der[..<leaf_der_len], &leaf, host)):
+                        error(invalid, "certificate does not match the host name")
+                    for i in 0..<32:
+                        leaf_x[i] = leaf.key_x[i]
+                        leaf_y[i] = leaf.key_y[i]
                 have_cert = true
                 try transcript.update(flight[mpos..<msg_end])
             elif mtype == 15:
@@ -304,7 +340,7 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
                     error(invalid, "CertificateVerify before Certificate")
                 var th_cert: u8[32]
                 try snapshot(&transcript, th_cert)
-                try verify_cert_verify(flight[mpos..<msg_end], &leaf, th_cert)
+                try verify_cert_verify(flight[mpos..<msg_end], leaf_x, leaf_y, th_cert)
                 try transcript.update(flight[mpos..<msg_end])
             elif mtype == 20:
                 var th_cv: u8[32]
@@ -357,51 +393,103 @@ pub func connect(host: str, port: u16, issuer_x: const u8[], issuer_y: const u8[
     secrets.server_seq = 0
     return conn
 
-func parse_server_hello(sh: const u8[], server_pub: u8[]) -> !:
-    if sh.length < 4 or sh[0] != 2:
+func parse_server_hello(sh: const u8[], expected_session_id: const u8[], server_pub: u8[]) -> !:
+    if sh.length < 44 or sh[0] != 2:
         error(invalid, "not a ServerHello")
+    let message_len = ((usize)sh[1] << 16) | ((usize)sh[2] << 8) | (usize)sh[3]
+    if message_len != sh.length - 4:
+        error(invalid, "ServerHello handshake length mismatch")
     var pos: usize = 4
+    if sh[pos] != 0x03 or sh[pos + 1] != 0x03:
+        error(invalid, "unexpected ServerHello legacy version")
     pos += 2
+    let hrr = b"\xcf\x21\xad\x74\xe5\x9a\x61\x11\xbe\x1d\x8c\x02\x1e\x65\xb8\x91\xc2\xa2\x11\x16\x7a\xbb\x8c\x5e\x07\x9e\x09\xe2\xc8\xa8\x33\x9c"
+    if same_bytes(sh[pos..<pos + 32], hrr):
+        error(invalid, "HelloRetryRequest is outside this TLS profile")
     pos += 32
+    if pos >= sh.length:
+        error(invalid, "truncated ServerHello session id")
     let sid_len = (usize)sh[pos]
+    if sid_len != expected_session_id.length or sid_len > 32 or sid_len > sh.length - pos - 1:
+        error(invalid, "ServerHello session id mismatch")
     pos += 1 + sid_len
+    for i in 0..<sid_len:
+        if sh[pos - sid_len + i] != expected_session_id[i]:
+            error(invalid, "ServerHello session id mismatch")
+    if sh.length - pos < 5:
+        error(invalid, "truncated ServerHello parameters")
+    if sh[pos] != 0x13 or sh[pos + 1] != 0x03:
+        error(invalid, "server did not select TLS_CHACHA20_POLY1305_SHA256")
     pos += 2
+    if sh[pos] != 0:
+        error(invalid, "ServerHello selected non-null compression")
     pos += 1
     let ext_len = ((usize)sh[pos] << 8) | (usize)sh[pos + 1]
     pos += 2
+    if ext_len != sh.length - pos:
+        error(invalid, "ServerHello extension length mismatch")
     let ext_end = pos + ext_len
-    while pos + 4 <= ext_end:
+    var have_version = false
+    var have_key = false
+    while pos < ext_end:
+        if ext_end - pos < 4:
+            error(invalid, "truncated ServerHello extension")
         let etype = ((usize)sh[pos] << 8) | (usize)sh[pos + 1]
         let elen = ((usize)sh[pos + 2] << 8) | (usize)sh[pos + 3]
         pos += 4
-        if etype == 0x0033:
-            let klen = ((usize)sh[pos + 2] << 8) | (usize)sh[pos + 3]
-            if klen != 32:
-                error(invalid, "unexpected key_share length")
+        if elen > ext_end - pos:
+            error(invalid, "ServerHello extension runs past its container")
+        if etype == 0x002b:
+            if have_version or elen != 2 or sh[pos] != 0x03 or sh[pos + 1] != 0x04:
+                error(invalid, "invalid ServerHello supported_versions")
+            have_version = true
+        elif etype == 0x0033:
+            if have_key or elen != 36 or sh[pos] != 0 or sh[pos + 1] != 0x1d or sh[pos + 2] != 0 or sh[pos + 3] != 32:
+                error(invalid, "invalid ServerHello x25519 key_share")
             for i in 0..<32:
                 server_pub[i] = sh[pos + 4 + (usize)i]
-            return
+            have_key = true
         pos += elen
-    error(invalid, "ServerHello has no x25519 key_share")
+    if not have_version or not have_key:
+        error(invalid, "ServerHello is missing required TLS 1.3 extensions")
 
 func extract_leaf(msg: const u8[], der_out: u8[], der_len: usize*) -> !:
+    if msg.length < 12 or msg[0] != 11:
+        error(invalid, "invalid Certificate handshake message")
+    let message_len = ((usize)msg[1] << 16) | ((usize)msg[2] << 8) | (usize)msg[3]
+    if message_len != msg.length - 4:
+        error(invalid, "Certificate handshake length mismatch")
     var pos: usize = 4
     let ctx_len = (usize)msg[pos]
+    if ctx_len != 0 or ctx_len > msg.length - pos - 1:
+        error(invalid, "unexpected certificate request context")
     pos += 1 + ctx_len
+    if msg.length - pos < 6:
+        error(invalid, "truncated certificate list")
+    let list_len = ((usize)msg[pos] << 16) | ((usize)msg[pos + 1] << 8) | (usize)msg[pos + 2]
     pos += 3
+    if list_len == 0 or list_len != msg.length - pos:
+        error(invalid, "invalid certificate list length")
     let cert_len = ((usize)msg[pos] << 16) | ((usize)msg[pos + 1] << 8) | (usize)msg[pos + 2]
     pos += 3
-    if cert_len > der_out.length:
+    if cert_len == 0 or cert_len > der_out.length or cert_len > msg.length - pos:
         error(invalid, "certificate is larger than the buffer")
     for i in 0..<cert_len:
         der_out[i] = msg[pos + i]
     *der_len = cert_len
 
-func verify_cert_verify(msg: const u8[], leaf: x509.Certificate*, transcript_hash: const u8[]) -> !:
+func verify_cert_verify(msg: const u8[], leaf_x: const u8[], leaf_y: const u8[], transcript_hash: const u8[]) -> !:
+    if msg.length < 8 or msg[0] != 15:
+        error(invalid, "invalid CertificateVerify handshake message")
+    let message_len = ((usize)msg[1] << 16) | ((usize)msg[2] << 8) | (usize)msg[3]
+    if message_len != msg.length - 4:
+        error(invalid, "CertificateVerify handshake length mismatch")
     let scheme = ((usize)msg[4] << 8) | (usize)msg[5]
     if scheme != 0x0403:
         error(invalid, "unsupported CertificateVerify signature scheme")
     let sig_len = ((usize)msg[6] << 8) | (usize)msg[7]
+    if sig_len == 0 or sig_len != msg.length - 8:
+        error(invalid, "CertificateVerify signature length mismatch")
     var r: u8[32]
     var s: u8[32]
     try parse_ecdsa_sig(msg[8..<8 + sig_len], r, s)
@@ -418,27 +506,35 @@ func verify_cert_verify(msg: const u8[], leaf: x509.Certificate*, transcript_has
     at += 32
     var digest: u8[32]
     discard(try crypto.digest(signed[..<at], digest, "sha256"))
-    if not (try crypto.ecdsa_p256_verify(leaf.key_x, leaf.key_y, digest, r, s)):
+    if not (try crypto.ecdsa_p256_verify(leaf_x, leaf_y, digest, r, s)):
         error(invalid, "CertificateVerify signature is invalid")
 
 func parse_ecdsa_sig(sig: const u8[], r: u8[], s: u8[]) -> !:
-    if sig[0] != 0x30:
+    if sig.length < 8 or sig[0] != 0x30 or sig[1] >= 0x80 or (usize)sig[1] != sig.length - 2:
         error(invalid, "ECDSA signature is not a SEQUENCE")
     var pos: usize = 2
-    if sig[pos] != 0x02:
+    if sig.length - pos < 2 or sig[pos] != 0x02:
         error(invalid, "ECDSA r is not an INTEGER")
     let rlen = (usize)sig[pos + 1]
+    if rlen == 0 or rlen > sig.length - pos - 2:
+        error(invalid, "truncated ECDSA r")
     try int_to_32(sig, pos + 2, rlen, r)
     pos += 2 + rlen
-    if sig[pos] != 0x02:
+    if sig.length - pos < 2 or sig[pos] != 0x02:
         error(invalid, "ECDSA s is not an INTEGER")
     let slen = (usize)sig[pos + 1]
+    if slen == 0 or slen != sig.length - pos - 2:
+        error(invalid, "truncated or trailing ECDSA s")
     try int_to_32(sig, pos + 2, slen, s)
 
 func int_to_32(buf: const u8[], content: usize, length: usize, out: u8[]) -> !:
+    if length == 0 or content > buf.length or length > buf.length - content or (buf[content] & 0x80) != 0:
+        error(invalid, "ECDSA INTEGER is empty, truncated or negative")
+    if length > 1 and buf[content] == 0 and buf[content + 1] < 0x80:
+        error(invalid, "ECDSA INTEGER has a redundant sign byte")
     var start = content
     var len = length
-    while len > 0 and buf[start] == 0:
+    if len > 1 and buf[start] == 0:
         start += 1
         len -= 1
     if len > 32:
@@ -764,4 +860,3 @@ pub func accept(conn: net.Connection*, host: str, cert: const u8[], d: const u8[
     try traffic_keys(c_ap, secrets.server_key, secrets.server_iv)
     secrets.client_seq = 0
     secrets.server_seq = 0
-

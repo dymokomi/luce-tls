@@ -1,0 +1,720 @@
+## Strict, bounded X.509 validation for the public HTTPS profile used by Luce.
+## The supported path is an ECDSA P-256 TLS leaf followed by zero or more
+## ECDSA P-384/SHA-384 issuers and an explicitly pinned P-384 trust anchor.
+## A server may include a certificate carrying the anchor SPKI; its own
+## signature is intentionally not part of the path, as the anchor is an input.
+import crypto_native as crypto
+from luce_tls.tls import hostname_matches
+
+pub let invalid = crypto.invalid
+pub let max_certificates: usize = 8
+pub let max_certificate_bytes: usize = 8192
+pub let max_chain_bytes: usize = 16384
+
+## ISRG Root X2, SHA-256 certificate fingerprint
+## 69:72:9B:8E:15:A8:6E:FC:17:7A:57:AF:B7:17:1D:FC:
+## 64:AD:D2:8C:2F:CA:8C:F1:50:7E:34:45:3C:CB:14:70.
+## Source: https://letsencrypt.org/certs/isrg-root-x2.pem
+pub let isrg_root_x2_x = b"\xcd\x9b\xd5\x9f\x80\x83\x0a\xec\x09\x4a\xf3\x16\x4a\x3e\x5c\xcf\x77\xac\xde\x67\x05\x0d\x1d\x07\xb6\xdc\x16\xfb\x5a\x8b\x14\xdb\xe2\x71\x60\xc4\xba\x45\x95\x11\x89\x8e\xea\x06\xdf\xf7\x2a\x16"
+pub let isrg_root_x2_y = b"\x1c\xa4\xb9\xc5\xc5\x32\xe0\x03\xe0\x1e\x82\x18\x38\x8b\xd7\x45\xd8\x0a\x6a\x6e\xe6\x00\x77\xfb\x02\x51\x7d\x22\xd8\x0a\x6e\x9a\x5b\x77\xdf\xf0\xfa\x41\xec\x39\xdc\x75\xca\x68\x07\x0c\x1f\xea"
+
+let curve_none: u8 = 0
+let curve_p256: u8 = 1
+let curve_p384: u8 = 2
+let signature_other: u8 = 0
+let signature_p384_sha384: u8 = 1
+
+struct Certificate:
+    var tbs_off: usize
+    var tbs_len: usize
+    var signature_kind: u8
+    var sig_r: u8[48]
+    var sig_s: u8[48]
+    var issuer_off: usize
+    var issuer_len: usize
+    var subject_off: usize
+    var subject_len: usize
+    var key_curve: u8
+    var key_x: u8[48]
+    var key_y: u8[48]
+    var not_before: i64
+    var not_after: i64
+    var san_off: usize
+    var san_len: usize
+    var basic_present: bool
+    var is_ca: bool
+    var path_len_present: bool
+    var path_len: usize
+    var key_usage_present: bool
+    var digital_signature: bool
+    var key_cert_sign: bool
+    var eku_present: bool
+    var server_auth: bool
+
+    func init():
+        let zero48: u8[48] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.tbs_off = 0
+        self.tbs_len = 0
+        self.signature_kind = signature_other
+        self.sig_r = zero48
+        self.sig_s = zero48
+        self.issuer_off = 0
+        self.issuer_len = 0
+        self.subject_off = 0
+        self.subject_len = 0
+        self.key_curve = curve_none
+        self.key_x = zero48
+        self.key_y = zero48
+        self.not_before = 0
+        self.not_after = 0
+        self.san_off = 0
+        self.san_len = 0
+        self.basic_present = false
+        self.is_ca = false
+        self.path_len_present = false
+        self.path_len = 0
+        self.key_usage_present = false
+        self.digital_signature = false
+        self.key_cert_sign = false
+        self.eku_present = false
+        self.server_auth = false
+
+func bytes_equal(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for i in 0..<a.length:
+        if a[i] != b[i]:
+            return false
+    return true
+
+func ranges_equal(a: const u8[], a_off: usize, a_len: usize, b: const u8[], b_off: usize, b_len: usize) -> bool:
+    if a_len != b_len:
+        return false
+    for i in 0..<a_len:
+        if a[a_off + i] != b[b_off + i]:
+            return false
+    return true
+
+## Read one DER TLV inside `limit`. Only definite, minimally encoded lengths
+## up to three bytes are accepted; certificate/profile bounds are much smaller.
+func read_tlv(der: const u8[], pos: usize, limit: usize, tag: u8*, content: usize*, length: usize*, next: usize*) -> !:
+    if limit > der.length or pos >= limit or limit - pos < 2:
+        error(invalid, "truncated DER element")
+    let observed = der[pos]
+    if (observed & 0x1f) == 0x1f:
+        error(invalid, "high-tag-number DER is unsupported")
+    let first = der[pos + 1]
+    var header: usize = 2
+    var count: usize = 0
+    var len: usize = 0
+    if first < 0x80:
+        len = (usize)first
+    else:
+        count = (usize)(first & 0x7f)
+        if count == 0 or count > 3 or limit - pos < 2 + count:
+            error(invalid, "invalid DER length")
+        if der[pos + 2] == 0:
+            error(invalid, "non-minimal DER length")
+        for i in 0..<count:
+            len = (len << 8) | (usize)der[pos + 2 + i]
+        if len < 128:
+            error(invalid, "non-minimal DER long length")
+        header += count
+    let body = pos + header
+    if body > limit or len > limit - body:
+        error(invalid, "DER length runs past its container")
+    *tag = observed
+    *content = body
+    *length = len
+    *next = body + len
+
+func expect(der: const u8[], pos: usize, limit: usize, want: u8, content: usize*, length: usize*, next: usize*) -> !:
+    var tag: u8
+    try read_tlv(der, pos, limit, &tag, content, length, next)
+    if tag != want:
+        error(invalid, "unexpected DER tag")
+
+func oid_is(der: const u8[], off: usize, length: usize, expected: const u8[]) -> bool:
+    if length != expected.length:
+        return false
+    for i in 0..<length:
+        if der[off + i] != expected[i]:
+            return false
+    return true
+
+func parse_positive_integer(der: const u8[], off: usize, length: usize, out: u8[]) -> !:
+    if length == 0 or (der[off] & 0x80) != 0:
+        error(invalid, "DER INTEGER is empty or negative")
+    if length > 1 and der[off] == 0 and der[off + 1] < 0x80:
+        error(invalid, "DER INTEGER has a redundant sign byte")
+    var start = off
+    var count = length
+    if count > 1 and der[start] == 0:
+        start += 1
+        count -= 1
+    if count > out.length:
+        error(invalid, "DER INTEGER exceeds the supported width")
+    for i in 0..<out.length:
+        out[i] = 0
+    for i in 0..<count:
+        out[out.length - count + i] = der[start + i]
+
+func parse_small_integer(der: const u8[], off: usize, length: usize) -> usize!:
+    if length == 0 or (der[off] & 0x80) != 0:
+        error(invalid, "DER INTEGER is empty or negative")
+    if length > 1 and der[off] == 0 and der[off + 1] < 0x80:
+        error(invalid, "DER INTEGER has a redundant sign byte")
+    var start = off
+    var count = length
+    if count > 1 and der[start] == 0:
+        start += 1
+        count -= 1
+    if count > sizeof(usize):
+        error(invalid, "DER INTEGER does not fit usize")
+    var value: usize = 0
+    for i in 0..<count:
+        value = (value << 8) | (usize)der[start + i]
+    return value
+
+func digit(der: const u8[], at: usize) -> i64!:
+    if der[at] < '0' or der[at] > '9':
+        error(invalid, "certificate time contains a non-digit")
+    return (i64)(der[at] - '0')
+
+func decimal2(der: const u8[], at: usize) -> i64!:
+    return (try digit(der, at)) * 10 + try digit(der, at + 1)
+
+func leap_year(year: i64) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+func month_days(year: i64, month: i64) -> i64:
+    if month == 2:
+        return 29 if leap_year(year) else 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+## RFC 5280 Internet certificates use Zulu UTCTime through 2049 and
+## GeneralizedTime thereafter. This public profile deliberately rejects dates
+## before the Unix epoch and all fractional/offset encodings.
+func parse_time(der: const u8[], tag: u8, off: usize, length: usize) -> i64!:
+    var at = off
+    var year: i64
+    if tag == 0x17:
+        if length != 13 or der[off + 12] != 'Z':
+            error(invalid, "invalid UTCTime")
+        let short = try decimal2(der, at)
+        year = 1900 + short if short >= 50 else 2000 + short
+        at += 2
+    elif tag == 0x18:
+        if length != 15 or der[off + 14] != 'Z':
+            error(invalid, "invalid GeneralizedTime")
+        year = (try decimal2(der, at)) * 100 + try decimal2(der, at + 2)
+        at += 4
+    else:
+        error(invalid, "unsupported certificate time encoding")
+    let month = try decimal2(der, at)
+    let day = try decimal2(der, at + 2)
+    let hour = try decimal2(der, at + 4)
+    let minute = try decimal2(der, at + 6)
+    let second = try decimal2(der, at + 8)
+    if year < 1970 or year > 9999 or month < 1 or month > 12:
+        error(invalid, "certificate time is outside the supported calendar")
+    if day < 1 or day > month_days(year, month) or hour > 23 or minute > 59 or second > 59:
+        error(invalid, "certificate time is not a valid UTC instant")
+    var days: i64 = 0
+    var y: i64 = 1970
+    while y < year:
+        days += 366 if leap_year(y) else 365
+        y += 1
+    var m: i64 = 1
+    while m < month:
+        days += month_days(year, m)
+        m += 1
+    days += day - 1
+    return ((days * 24 + hour) * 60 + minute) * 60 + second
+
+func parse_algorithm(der: const u8[], start: usize, limit: usize, kind: u8*) -> usize!:
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, start, limit, 0x30, &seq_c, &seq_l, &seq_n)
+    var oid_c: usize
+    var oid_l: usize
+    var oid_n: usize
+    try expect(der, seq_c, seq_c + seq_l, 0x06, &oid_c, &oid_l, &oid_n)
+    *kind = signature_other
+    let ecdsa_sha384 = b"\x2a\x86\x48\xce\x3d\x04\x03\x03"
+    if oid_is(der, oid_c, oid_l, ecdsa_sha384):
+        if oid_n != seq_c + seq_l:
+            error(invalid, "ECDSA AlgorithmIdentifier has parameters")
+        *kind = signature_p384_sha384
+    return seq_n
+
+func parse_signature(der: const u8[], off: usize, length: usize, cert: Certificate*) -> !:
+    if length < 1 or der[off] != 0:
+        error(invalid, "certificate signature BIT STRING has unused bits")
+    if cert.signature_kind != signature_p384_sha384:
+        return
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, off + 1, off + length, 0x30, &seq_c, &seq_l, &seq_n)
+    if seq_n != off + length:
+        error(invalid, "trailing certificate signature bytes")
+    var r_c: usize
+    var r_l: usize
+    var after_r: usize
+    try expect(der, seq_c, seq_c + seq_l, 0x02, &r_c, &r_l, &after_r)
+    var s_c: usize
+    var s_l: usize
+    var after_s: usize
+    try expect(der, after_r, seq_c + seq_l, 0x02, &s_c, &s_l, &after_s)
+    if after_s != seq_c + seq_l:
+        error(invalid, "trailing ECDSA signature fields")
+    try parse_positive_integer(der, r_c, r_l, cert.sig_r)
+    try parse_positive_integer(der, s_c, s_l, cert.sig_s)
+
+func parse_spki(der: const u8[], start: usize, limit: usize, cert: Certificate*) -> usize!:
+    var spki_c: usize
+    var spki_l: usize
+    var spki_n: usize
+    try expect(der, start, limit, 0x30, &spki_c, &spki_l, &spki_n)
+    var alg_c: usize
+    var alg_l: usize
+    var after_alg: usize
+    try expect(der, spki_c, spki_c + spki_l, 0x30, &alg_c, &alg_l, &after_alg)
+    var oid_c: usize
+    var oid_l: usize
+    var after_oid: usize
+    try expect(der, alg_c, alg_c + alg_l, 0x06, &oid_c, &oid_l, &after_oid)
+    let ec_public = b"\x2a\x86\x48\xce\x3d\x02\x01"
+    if not oid_is(der, oid_c, oid_l, ec_public):
+        error(invalid, "certificate public key is not EC")
+    var curve_c: usize
+    var curve_l: usize
+    var after_curve: usize
+    try expect(der, after_oid, alg_c + alg_l, 0x06, &curve_c, &curve_l, &after_curve)
+    if after_curve != alg_c + alg_l:
+        error(invalid, "trailing EC algorithm parameters")
+    let p256 = b"\x2a\x86\x48\xce\x3d\x03\x01\x07"
+    let p384 = b"\x2b\x81\x04\x00\x22"
+    var width: usize
+    if oid_is(der, curve_c, curve_l, p256):
+        cert.key_curve = curve_p256
+        width = 32
+    elif oid_is(der, curve_c, curve_l, p384):
+        cert.key_curve = curve_p384
+        width = 48
+    else:
+        error(invalid, "unsupported EC certificate curve")
+    var key_c: usize
+    var key_l: usize
+    var key_n: usize
+    try expect(der, after_alg, spki_c + spki_l, 0x03, &key_c, &key_l, &key_n)
+    if key_n != spki_c + spki_l or key_l != 2 + 2 * width or der[key_c] != 0 or der[key_c + 1] != 4:
+        error(invalid, "invalid uncompressed EC public key")
+    for i in 0..<width:
+        cert.key_x[i] = der[key_c + 2 + i]
+        cert.key_y[i] = der[key_c + 2 + width + i]
+    return spki_n
+
+func parse_basic_constraints(der: const u8[], off: usize, length: usize, cert: Certificate*) -> !:
+    if cert.basic_present:
+        error(invalid, "duplicate basicConstraints")
+    cert.basic_present = true
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, off, off + length, 0x30, &seq_c, &seq_l, &seq_n)
+    if seq_n != off + length:
+        error(invalid, "trailing basicConstraints bytes")
+    var pos = seq_c
+    let limit = seq_c + seq_l
+    if pos < limit and der[pos] == 0x01:
+        var c: usize
+        var l: usize
+        var n: usize
+        try expect(der, pos, limit, 0x01, &c, &l, &n)
+        if l != 1 or der[c] != 0xff:
+            error(invalid, "non-canonical basicConstraints cA")
+        cert.is_ca = true
+        pos = n
+    if pos < limit:
+        var c: usize
+        var l: usize
+        var n: usize
+        try expect(der, pos, limit, 0x02, &c, &l, &n)
+        cert.path_len = try parse_small_integer(der, c, l)
+        cert.path_len_present = true
+        pos = n
+    if pos != limit or (cert.path_len_present and not cert.is_ca):
+        error(invalid, "invalid basicConstraints sequence")
+
+func parse_key_usage(der: const u8[], off: usize, length: usize, cert: Certificate*) -> !:
+    if cert.key_usage_present:
+        error(invalid, "duplicate keyUsage")
+    cert.key_usage_present = true
+    var c: usize
+    var l: usize
+    var n: usize
+    try expect(der, off, off + length, 0x03, &c, &l, &n)
+    if n != off + length or l < 2 or der[c] > 7:
+        error(invalid, "invalid keyUsage BIT STRING")
+    let unused = (usize)der[c]
+    if unused > 0 and (der[c + l - 1] & (u8)((1 << unused) - 1)) != 0:
+        error(invalid, "non-zero unused keyUsage bits")
+    cert.digital_signature = (der[c + 1] & 0x80) != 0
+    cert.key_cert_sign = (der[c + 1] & 0x04) != 0
+
+func parse_eku(der: const u8[], off: usize, length: usize, cert: Certificate*) -> !:
+    if cert.eku_present:
+        error(invalid, "duplicate extendedKeyUsage")
+    cert.eku_present = true
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, off, off + length, 0x30, &seq_c, &seq_l, &seq_n)
+    if seq_n != off + length or seq_l == 0:
+        error(invalid, "invalid extendedKeyUsage")
+    let server = b"\x2b\x06\x01\x05\x05\x07\x03\x01"
+    let any = b"\x55\x1d\x25\x00"
+    var pos = seq_c
+    let limit = seq_c + seq_l
+    while pos < limit:
+        var c: usize
+        var l: usize
+        var n: usize
+        try expect(der, pos, limit, 0x06, &c, &l, &n)
+        if oid_is(der, c, l, server) or oid_is(der, c, l, any):
+            cert.server_auth = true
+        pos = n
+
+func parse_san(der: const u8[], off: usize, length: usize, cert: Certificate*) -> !:
+    if cert.san_len != 0:
+        error(invalid, "duplicate subjectAltName")
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, off, off + length, 0x30, &seq_c, &seq_l, &seq_n)
+    if seq_n != off + length or seq_l == 0:
+        error(invalid, "invalid subjectAltName")
+    var pos = seq_c
+    let limit = seq_c + seq_l
+    while pos < limit:
+        var tag: u8
+        var c: usize
+        var l: usize
+        var n: usize
+        try read_tlv(der, pos, limit, &tag, &c, &l, &n)
+        if tag == 0x82:
+            if l == 0:
+                error(invalid, "empty subjectAltName dNSName")
+            for i in 0..<l:
+                if der[c + i] < 0x21 or der[c + i] > 0x7e:
+                    error(invalid, "non-ASCII subjectAltName dNSName")
+        pos = n
+    cert.san_off = seq_c
+    cert.san_len = seq_l
+
+func parse_extensions(der: const u8[], start: usize, limit: usize, cert: Certificate*) -> !:
+    var seq_c: usize
+    var seq_l: usize
+    var seq_n: usize
+    try expect(der, start, limit, 0x30, &seq_c, &seq_l, &seq_n)
+    if seq_n != limit or seq_l == 0:
+        error(invalid, "invalid certificate extensions")
+    var seen_off: usize[32]
+    var seen_len: usize[32]
+    var seen: usize = 0
+    var pos = seq_c
+    let end = seq_c + seq_l
+    while pos < end:
+        if seen >= 32:
+            error(invalid, "too many certificate extensions")
+        var ext_c: usize
+        var ext_l: usize
+        var ext_n: usize
+        try expect(der, pos, end, 0x30, &ext_c, &ext_l, &ext_n)
+        var oid_c: usize
+        var oid_l: usize
+        var after_oid: usize
+        try expect(der, ext_c, ext_c + ext_l, 0x06, &oid_c, &oid_l, &after_oid)
+        for i in 0..<seen:
+            if ranges_equal(der, oid_c, oid_l, der, seen_off[i], seen_len[i]):
+                error(invalid, "duplicate certificate extension")
+        seen_off[seen] = oid_c
+        seen_len[seen] = oid_l
+        seen += 1
+        var critical = false
+        var value_at = after_oid
+        if value_at < ext_c + ext_l and der[value_at] == 0x01:
+            var c: usize
+            var l: usize
+            var n: usize
+            try expect(der, value_at, ext_c + ext_l, 0x01, &c, &l, &n)
+            if l != 1 or der[c] != 0xff:
+                error(invalid, "non-canonical extension critical flag")
+            critical = true
+            value_at = n
+        var value_c: usize
+        var value_l: usize
+        var value_n: usize
+        try expect(der, value_at, ext_c + ext_l, 0x04, &value_c, &value_l, &value_n)
+        if value_n != ext_c + ext_l:
+            error(invalid, "trailing extension fields")
+        let key_usage = b"\x55\x1d\x0f"
+        let san = b"\x55\x1d\x11"
+        let basic = b"\x55\x1d\x13"
+        let eku = b"\x55\x1d\x25"
+        let name_constraints = b"\x55\x1d\x1e"
+        if oid_is(der, oid_c, oid_l, key_usage):
+            try parse_key_usage(der, value_c, value_l, cert)
+        elif oid_is(der, oid_c, oid_l, san):
+            try parse_san(der, value_c, value_l, cert)
+        elif oid_is(der, oid_c, oid_l, basic):
+            try parse_basic_constraints(der, value_c, value_l, cert)
+        elif oid_is(der, oid_c, oid_l, eku):
+            try parse_eku(der, value_c, value_l, cert)
+        elif oid_is(der, oid_c, oid_l, name_constraints):
+            error(invalid, "nameConstraints are outside the supported public profile")
+        elif critical:
+            error(invalid, "unsupported critical certificate extension")
+        pos = ext_n
+
+func parse_certificate(der: const u8[], cert: Certificate*) -> !:
+    if der.length == 0 or der.length > max_certificate_bytes:
+        error(invalid, "certificate size is outside the profile")
+    var outer_c: usize
+    var outer_l: usize
+    var outer_n: usize
+    try expect(der, 0, der.length, 0x30, &outer_c, &outer_l, &outer_n)
+    if outer_n != der.length:
+        error(invalid, "trailing certificate bytes")
+    var tag: u8
+    var tbs_c: usize
+    var tbs_l: usize
+    var after_tbs: usize
+    try read_tlv(der, outer_c, outer_c + outer_l, &tag, &tbs_c, &tbs_l, &after_tbs)
+    if tag != 0x30:
+        error(invalid, "tbsCertificate is not a SEQUENCE")
+    cert.tbs_off = outer_c
+    cert.tbs_len = after_tbs - outer_c
+    let outer_alg_start = after_tbs
+    let after_alg = try parse_algorithm(der, outer_alg_start, outer_c + outer_l, &cert.signature_kind)
+    var bit_c: usize
+    var bit_l: usize
+    var after_bit: usize
+    try expect(der, after_alg, outer_c + outer_l, 0x03, &bit_c, &bit_l, &after_bit)
+    if after_bit != outer_c + outer_l:
+        error(invalid, "trailing certificate fields")
+    try parse_signature(der, bit_c, bit_l, cert)
+    var pos = tbs_c
+    var c: usize
+    var l: usize
+    var n: usize
+    try expect(der, pos, tbs_c + tbs_l, 0xa0, &c, &l, &n)
+    var version_c: usize
+    var version_l: usize
+    var version_n: usize
+    try expect(der, c, c + l, 0x02, &version_c, &version_l, &version_n)
+    if version_n != c + l or version_l != 1 or der[version_c] != 2:
+        error(invalid, "certificate is not canonical X.509 v3")
+    pos = n
+    try expect(der, pos, tbs_c + tbs_l, 0x02, &c, &l, &n)
+    if l == 0 or l > 20:
+        error(invalid, "invalid certificate serial number")
+    var serial: u8[20]
+    try parse_positive_integer(der, c, l, serial)
+    var serial_nonzero = false
+    for i in 0..<20:
+        if serial[i] != 0: serial_nonzero = true
+    if not serial_nonzero:
+        error(invalid, "certificate serial number is zero")
+    pos = n
+    let inner_alg_start = pos
+    var inner_kind: u8
+    pos = try parse_algorithm(der, pos, tbs_c + tbs_l, &inner_kind)
+    if inner_kind != cert.signature_kind or not ranges_equal(der, inner_alg_start, pos - inner_alg_start, der, outer_alg_start, after_alg - outer_alg_start):
+        error(invalid, "certificate signature algorithms disagree")
+    cert.issuer_off = pos
+    try expect(der, pos, tbs_c + tbs_l, 0x30, &c, &l, &n)
+    cert.issuer_len = n - pos
+    pos = n
+    var validity_c: usize
+    var validity_l: usize
+    var validity_n: usize
+    try expect(der, pos, tbs_c + tbs_l, 0x30, &validity_c, &validity_l, &validity_n)
+    var time_tag: u8
+    try read_tlv(der, validity_c, validity_c + validity_l, &time_tag, &c, &l, &n)
+    cert.not_before = try parse_time(der, time_tag, c, l)
+    try read_tlv(der, n, validity_c + validity_l, &time_tag, &c, &l, &n)
+    cert.not_after = try parse_time(der, time_tag, c, l)
+    if n != validity_c + validity_l or cert.not_after < cert.not_before:
+        error(invalid, "invalid certificate validity interval")
+    pos = validity_n
+    cert.subject_off = pos
+    try expect(der, pos, tbs_c + tbs_l, 0x30, &c, &l, &n)
+    cert.subject_len = n - pos
+    pos = n
+    pos = try parse_spki(der, pos, tbs_c + tbs_l, cert)
+    if pos >= tbs_c + tbs_l:
+        error(invalid, "X.509 v3 certificate has no extensions")
+    var ext_tag: u8
+    try read_tlv(der, pos, tbs_c + tbs_l, &ext_tag, &c, &l, &n)
+    if ext_tag != 0xa3 or n != tbs_c + tbs_l:
+        error(invalid, "unsupported optional tbsCertificate fields")
+    try parse_extensions(der, c, c + l, cert)
+
+func valid_now(cert: Certificate*, now: i64) -> bool:
+    return now >= cert.not_before and now <= cert.not_after
+
+func is_anchor(cert: Certificate*, root_x: const u8[], root_y: const u8[]) -> bool:
+    if cert.key_curve != curve_p384 or root_x.length != 48 or root_y.length != 48:
+        return false
+    return bytes_equal(cert.key_x, root_x) and bytes_equal(cert.key_y, root_y)
+
+func is_self_issued(der: const u8[], cert: Certificate*) -> bool:
+    return ranges_equal(der, cert.issuer_off, cert.issuer_len, der, cert.subject_off, cert.subject_len)
+
+func validate_ca(cert: Certificate*, ca_below: usize) -> !:
+    if not cert.basic_present or not cert.is_ca:
+        error(invalid, "issuer certificate is not a CA")
+    if not cert.key_usage_present or not cert.key_cert_sign:
+        error(invalid, "issuer certificate cannot sign certificates")
+    if cert.eku_present and not cert.server_auth:
+        error(invalid, "issuer extendedKeyUsage excludes TLS server authentication")
+    if cert.path_len_present and ca_below > cert.path_len:
+        error(invalid, "certificate pathLenConstraint was exceeded")
+
+func validate_leaf(der: const u8[], cert: Certificate*, host: str, now: i64, leaf_x: u8[], leaf_y: u8[]) -> !:
+    if cert.key_curve != curve_p256:
+        error(invalid, "TLS leaf key is not P-256")
+    if not valid_now(cert, now):
+        error(invalid, "TLS leaf certificate is outside its validity window")
+    if cert.basic_present and cert.is_ca:
+        error(invalid, "TLS leaf certificate is a CA")
+    if cert.key_usage_present and not cert.digital_signature:
+        error(invalid, "TLS leaf keyUsage excludes digital signatures")
+    if cert.eku_present and not cert.server_auth:
+        error(invalid, "TLS leaf extendedKeyUsage excludes server authentication")
+    if not (try matches_dns_name(der, cert, host)):
+        error(invalid, "TLS leaf certificate does not match the host")
+    if leaf_x.length < 32 or leaf_y.length < 32:
+        error(invalid, "leaf public-key output is too small")
+    for i in 0..<32:
+        leaf_x[i] = cert.key_x[i]
+        leaf_y[i] = cert.key_y[i]
+
+func matches_dns_name(der: const u8[], cert: Certificate*, host: str) -> bool!:
+    if cert.san_len == 0:
+        return false
+    var pos = cert.san_off
+    let limit = cert.san_off + cert.san_len
+    while pos < limit:
+        var tag: u8
+        var c: usize
+        var l: usize
+        var n: usize
+        try read_tlv(der, pos, limit, &tag, &c, &l, &n)
+        if tag == 0x82 and hostname_matches((str)der[c..<c + l], host):
+            return true
+        pos = n
+    return false
+
+func verify_with_key(der: const u8[], cert: Certificate*, x: const u8[], y: const u8[]) -> bool!:
+    if cert.signature_kind != signature_p384_sha384 or x.length != 48 or y.length != 48:
+        return false
+    var digest: u8[48]
+    discard(try crypto.digest(der[cert.tbs_off..<cert.tbs_off + cert.tbs_len], digest, "sha384"))
+    return try crypto.ecdsa_p384_verify(x, y, digest, cert.sig_r, cert.sig_s)
+
+func u24(data: const u8[], at: usize) -> usize:
+    return ((usize)data[at] << 16) | ((usize)data[at + 1] << 8) | (usize)data[at + 2]
+
+## Validate a complete TLS 1.3 server Certificate handshake message. The
+## certificate request context and per-entry extensions must be empty because
+## this client did not request either OCSP or SCT CertificateEntry extensions.
+## The authenticated P-256 leaf key is copied to `leaf_x`/`leaf_y`.
+pub func verify_server_chain(message: const u8[], host: str, now: i64,
+    root_x: const u8[], root_y: const u8[], leaf_x: u8[], leaf_y: u8[]) -> !:
+    if root_x.length != 48 or root_y.length != 48:
+        error(invalid, "P-384 trust anchor coordinates must be 48 bytes")
+    if message.length < 12 or message[0] != 11 or u24(message, 1) != message.length - 4:
+        error(invalid, "invalid TLS Certificate handshake message")
+    var pos: usize = 4
+    let context_len = (usize)message[pos]
+    pos += 1
+    if context_len != 0 or pos + context_len + 3 > message.length:
+        error(invalid, "unexpected TLS certificate request context")
+    pos += context_len
+    let list_len = u24(message, pos)
+    pos += 3
+    if list_len == 0 or list_len > max_chain_bytes or list_len != message.length - pos:
+        error(invalid, "invalid TLS certificate_list length")
+    var offsets: usize[8]
+    var lengths: usize[8]
+    var count: usize = 0
+    let list_end = pos + list_len
+    while pos < list_end:
+        if count >= max_certificates or list_end - pos < 5:
+            error(invalid, "too many or truncated TLS certificates")
+        let cert_len = u24(message, pos)
+        pos += 3
+        if cert_len == 0 or cert_len > max_certificate_bytes or cert_len > list_end - pos:
+            error(invalid, "invalid TLS certificate length")
+        offsets[count] = pos
+        lengths[count] = cert_len
+        for previous in 0..<count:
+            if ranges_equal(message, pos, cert_len, message, offsets[previous], lengths[previous]):
+                error(invalid, "duplicate certificate in TLS path")
+        pos += cert_len
+        if list_end - pos < 2:
+            error(invalid, "truncated TLS CertificateEntry extensions")
+        let extension_len = ((usize)message[pos] << 8) | (usize)message[pos + 1]
+        pos += 2
+        if extension_len != 0 or extension_len > list_end - pos:
+            error(invalid, "unexpected TLS CertificateEntry extensions")
+        pos += extension_len
+        count += 1
+    if pos != list_end or count == 0:
+        error(invalid, "malformed TLS certificate list")
+    var leaf = Certificate()
+    try parse_certificate(message[offsets[0]..<offsets[0] + lengths[0]], &leaf)
+    try validate_leaf(message[offsets[0]..<offsets[0] + lengths[0]], &leaf, host, now, leaf_x, leaf_y)
+    if is_anchor(&leaf, root_x, root_y):
+        error(invalid, "TLS leaf cannot be the public trust anchor")
+    var ca_below: usize = 0
+    if count > 1:
+        for i in 0..<count - 1:
+            let child_der = message[offsets[i]..<offsets[i] + lengths[i]]
+            let issuer_der = message[offsets[i + 1]..<offsets[i + 1] + lengths[i + 1]]
+            var child = Certificate()
+            var issuer = Certificate()
+            try parse_certificate(child_der, &child)
+            try parse_certificate(issuer_der, &issuer)
+            if not valid_now(&child, now) or not valid_now(&issuer, now):
+                error(invalid, "certificate path is outside a validity window")
+            if not ranges_equal(child_der, child.issuer_off, child.issuer_len,
+                issuer_der, issuer.subject_off, issuer.subject_len):
+                error(invalid, "certificate issuer and subject names do not chain")
+            try validate_ca(&issuer, ca_below)
+            if issuer.key_curve != curve_p384 or not (try verify_with_key(child_der, &child, issuer.key_x, issuer.key_y)):
+                error(invalid, "certificate path signature did not verify")
+            if child.is_ca and not is_self_issued(child_der, &child):
+                ca_below += 1
+            if is_anchor(&issuer, root_x, root_y):
+                if i + 1 != count - 1:
+                    error(invalid, "certificates follow the trust anchor")
+                return
+    let last_der = message[offsets[count - 1]..<offsets[count - 1] + lengths[count - 1]]
+    var last = Certificate()
+    try parse_certificate(last_der, &last)
+    if not valid_now(&last, now):
+        error(invalid, "last certificate is outside its validity window")
+    if count > 1:
+        try validate_ca(&last, ca_below)
+    if not (try verify_with_key(last_der, &last, root_x, root_y)):
+        error(invalid, "certificate path does not terminate at the trust anchor")
