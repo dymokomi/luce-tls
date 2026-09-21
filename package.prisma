@@ -1,0 +1,30 @@
+#prisma 4.0
+def package "luce-tls" {
+    str owner = "dymokomi"
+    str version = "0.1.0"
+    str language = "luce-base"
+    str description = "Native Luce Base TLS 1.3. MIT OR Apache-2.0."
+    str readme = "README.md"
+
+    def export "tls" {
+        str module = "luce_tls.tls"
+    }
+
+    def export "x509" {
+        str module = "luce_tls.x509"
+    }
+
+    def export "chain" {
+        str module = "luce_tls.chain"
+    }
+
+    def export "session" {
+        str module = "luce_tls.session"
+    }
+
+    def dependency "luce-crypto" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-crypto"
+    }
+}
