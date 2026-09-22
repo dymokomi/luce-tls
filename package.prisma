@@ -1,7 +1,8 @@
 #prisma 4.0
 def package "luce-tls" {
     str owner = "dymokomi"
-    str version = "0.1.0"
+    str version = "0.1.1"
+    str kind = "package"
     str language = "luce-base"
     str description = "Native Luce Base TLS 1.3. MIT OR Apache-2.0."
     str readme = "README.md"
