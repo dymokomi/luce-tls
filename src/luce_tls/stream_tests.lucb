@@ -25,17 +25,10 @@ var g_step: @u64
 var g_result: @u64
 var g_cancel: sync.Cancellation
 
-## LUCE-BUG: an `@u64*` parameter cannot be loaded and `&g_x` of an `@u64`
-## global does not convert to it (luce-base af3980f), so each flag gets a
-## named reader instead of one `wait_for(flag: @u64*, value)` helper.
-func flag_value(which: u8) -> u64:
-    if which == 0: return g_ready.load(.acquire)
-    if which == 1: return g_step.load(.acquire)
-    return g_result.load(.acquire)
-
-func wait_for(which: u8, value: u64):
+## Wait, at most five seconds, until `flag` reaches `value`.
+func wait_for(flag: (@u64)*, value: u64):
     var i: usize = 0
-    while flag_value(which) < value and i < 500:
+    while flag.load(.acquire) < value and i < 500:
         thread.sleep(10)
         i += 1
 
@@ -55,10 +48,10 @@ func serve(conn: net.Connection*) -> !:
     # One record carrying six bytes, for pending().
     try channel.write_application(conn, b"abcdef")
     # After the client's timed-out read, cancel its next blocked read.
-    wait_for(1, 1)
+    wait_for(&g_step, 1)
     thread.sleep(50)
     g_cancel.request()
-    wait_for(1, 2)
+    wait_for(&g_step, 2)
     try channel.write_application(conn, b"late")
     # Expect close_notify.
     var tail: u8[16]
@@ -195,13 +188,13 @@ pub func main(arguments: str[]) -> i32!:
     var worker = try thread.spawn(server_main, none, name = "tls-stream-server")
     defer worker.join() catch failure:
         discard(failure)
-    wait_for(0, 1)
+    wait_for(&g_ready, 1)
     assert(g_ready.load(.acquire) == 1)
     let port = (u16)g_port.load(.acquire)
     let pinned = try tls_stream.Trust.pinned_issuer(g_qx, g_qy)
     try implicit_tls(port, pinned)
     try starttls(port, pinned)
-    wait_for(2, 1)
+    wait_for(&g_result, 1)
     assert(g_result.load(.acquire) == 1)
     # A wrong pin must fail the handshake.
     let wrong = try tls_stream.Trust.pinned_issuer(g_qy, g_qx)
