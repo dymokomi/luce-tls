@@ -65,7 +65,7 @@ with a caller-owned `net.Connection` and `Secrets`) remains for blocking use.
 
 - TLS 1.3 only (RFC 8446). SNI is sent for DNS names. HelloRetryRequest
   (cookie and group change) is handled. Post-handshake NewSessionTicket is
-  ignored and KeyUpdate is honoured. Records are fragmented at 2^14 bytes. A
+  ignored and KeyUpdate is honoured (and answered on the next write). Records are fragmented at 2^14 bytes. A
   CertificateRequest is answered with an empty Certificate.
 - Cipher suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384 and
   TLS_CHACHA20_POLY1305_SHA256. Key exchange: X25519, and secp256r1 after a

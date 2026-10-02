@@ -1,5 +1,7 @@
 ## Loopback handshakes over every cipher suite, with and without a
-## HelloRetryRequest that moves the key exchange from x25519 to secp256r1.
+## HelloRetryRequest that moves the key exchange from x25519 to secp256r1, and
+## a server-initiated KeyUpdate that the client must follow and answer.
+import io
 import net
 import c
 import thread
@@ -31,6 +33,11 @@ func serve_one(listener: net.Listener*, index: usize) -> !:
     var buffer: u8[16]
     let n = try channel.read_application(&conn, buffer)
     try channel.write_application(&conn, buffer[..<n])
+    # Rotate keys in both directions, then echo once more under the new keys.
+    try channel.request_key_update(&conn)
+    try channel.write_application(&conn, b"next")
+    let m = try channel.read_application(&conn, buffer)
+    try channel.write_application(&conn, buffer[..<m])
 
 func server_main(raw: void*?):
     discard(raw)
@@ -72,7 +79,12 @@ pub func main(arguments: str[]) -> i32!:
             assert(n > 0)
             got += n
         assert(reply[0] == 'p' and reply[1] == 'i' and reply[3] == 'g')
+        try io.read_exact(&stream, reply)
+        assert(reply[0] == 'n' and reply[3] == 't')
+        discard(try stream.write(b"more"))
+        try io.read_exact(&stream, reply)
+        assert(reply[0] == 'm' and reply[3] == 'e')
         try stream.close()
     assert(hs.p256_key_exchange)
-    print("PASS TLS 1.3 handshakes: AES-128-GCM, AES-256-GCM, ChaCha20, HelloRetryRequest to secp256r1")
+    print("PASS TLS 1.3 handshakes: AES-128-GCM, AES-256-GCM, ChaCha20, HelloRetryRequest to secp256r1, KeyUpdate")
     return 0

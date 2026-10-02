@@ -332,6 +332,13 @@ pub struct Channel:
             self.key_update_due = false
         try self.send(sink, application_data, data)
 
+    ## Send a KeyUpdate asking the peer to update too (RFC 8446 §4.6.3), then
+    ## switch this side's write key.
+    pub mutating func request_key_update(sink: io.Writer) -> !:
+        let message = b"\x18\x00\x00\x01\x01"
+        try self.send(sink, handshake, message)
+        try self.update_write_key()
+
     ## Handle a received alert record: close_notify ends the stream; any other
     ## alert fails the channel with a diagnostic naming it.
     pub mutating func receive_alert() -> !:
