@@ -1,7 +1,8 @@
 ## A small TLS 1.3 server handshake for private endpoints and loopback tests:
 ## one ECDSA-P256 certificate, x25519 key exchange, and the first mutually
 ## supported cipher suite. A test may force a HelloRetryRequest by asking for a
-## group the client did not send a share for. No resumption or client certs.
+## group the client did not send a share for, and may request a client
+## certificate, which must then arrive empty. No resumption.
 import io
 import memory
 import os
@@ -30,8 +31,9 @@ struct ClientHello:
 ## Answer a client on an accepted transport with certificate `der` and P-256
 ## private key `d`. `retry_group`, when not zero, is demanded by a
 ## HelloRetryRequest unless the first ClientHello already shares it.
+## `request_certificate` sends a CertificateRequest.
 pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, der: const u8[], d: const u8[],
-    retry_group: u16 = 0) -> !:
+    retry_group: u16 = 0, request_certificate: bool = false) -> !:
     if der.length == 0 or der.length > 16000:
         error(invalid, "server certificate size is out of range")
     var messages = try hs.Messages.create()
@@ -76,14 +78,19 @@ pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, de
     try channel.protect_read(suite, schedule.handshake_secret(true))
     var flight = try new u8[der.length + 512] in memory.heap
     defer free(flight) in memory.heap
-    let flight_size = try build_flight(flight, &schedule, der, d, suite)
+    let flight_size = try build_flight(flight, &schedule, der, d, suite, request_certificate)
     try channel.send(sink, record.handshake, flight[..<flight_size])
     var client_secret: u8[48]
     var server_secret: u8[48]
     defer crypto.wipe(client_secret)
     defer crypto.wipe(server_secret)
     try schedule.enter_application(client_secret, server_secret)
-    let message = try messages.next(channel, source)
+    var message = try messages.next(channel, source)
+    if request_certificate:
+        if message.length != 8 or message[0] != hs.certificate or (message[4] | message[5] | message[6] | message[7]) != 0:
+            error(invalid, "expected an empty client Certificate")
+        try schedule.add(message)
+        message = try messages.next(channel, source)
     var expected: u8[48]
     try schedule.finished_value(schedule.handshake_secret(true), expected[..<suite.hash_size])
     try hs.check_finished(message, expected[..<suite.hash_size])
@@ -204,10 +211,15 @@ func build_server_hello(out: u8[], hello: const ClientHello*, retry: bool, group
     return b.size()
 
 ## EncryptedExtensions, Certificate, CertificateVerify and server Finished.
-func build_flight(out: u8[], schedule: hs.Schedule*, der: const u8[], d: const u8[], suite: record.Suite) -> usize!:
+func build_flight(out: u8[], schedule: hs.Schedule*, der: const u8[], d: const u8[], suite: record.Suite,
+    request_certificate: bool) -> usize!:
     var b = hs.Builder.over(out)
     b.put(b"\x08\x00\x00\x02\x00\x00")
     try schedule.add(out[..<6])
+    if request_certificate:
+        let request = b"\x0d\x00\x00\x0b\x00\x00\x08\x00\x0d\x00\x04\x00\x02\x04\x03"
+        b.put(request)
+        try schedule.add(request)
     let certificate_at = b.size()
     b.put8(hs.certificate)
     let body = b.open(3)

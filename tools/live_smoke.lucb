@@ -1,0 +1,113 @@
+## Live handshake smoke test against real mail servers; not part of CI.
+## Usage: live_smoke MODE HOST PORT, MODE one of
+##   imaps          TLS on connect, IMAP: greeting, a1 CAPABILITY, a2 LOGOUT
+##   imap-starttls  plaintext IMAP, a0 STARTTLS, then the same exchange
+##   smtps          TLS on connect, SMTP: greeting, EHLO, QUIT
+##   smtp-starttls  plaintext SMTP, EHLO, STARTTLS, then EHLO, QUIT
+##   https          TLS on connect, HTTP/1.1 HEAD /
+## Prints each server line and "OK <host>:<port>" or the failure.
+import io
+import net
+import tls_stream
+
+## Read one CRLF-terminated line through a Reader; returns its length.
+func read_line(source: io.Reader, line: u8[]) -> usize!:
+    var used: usize = 0
+    while used < line.length:
+        let count = try source.read(line[used..<used + 1])
+        if count == 0:
+            error(tls_stream.invalid, "the server closed the connection")
+        used += 1
+        if line[used - 1] == '\n':
+            return used
+    error(tls_stream.invalid, "server line is too long")
+
+func show(prefix: str, line: const u8[]):
+    var end = line.length
+    while end > 0 and (line[end - 1] == '\n' or line[end - 1] == '\r'):
+        end -= 1
+    print(f"{prefix}{(str)line[..<end]}")
+
+## Read lines until one starts with `tag`.
+func read_until(source: io.Reader, tag: str) -> !:
+    var line: u8[4096]
+    while true:
+        let size = try read_line(source, line)
+        show("  S: ", line[..<size])
+        if size >= tag.length and (str)line[..<tag.length] == tag:
+            return
+
+## Read an SMTP reply (lines until "NNN " rather than "NNN-").
+func read_smtp(source: io.Reader) -> !:
+    var line: u8[4096]
+    while true:
+        let size = try read_line(source, line)
+        show("  S: ", line[..<size])
+        if size < 4 or line[3] != '-':
+            return
+
+func send(sink: io.Writer, text: str) -> !:
+    show("  C: ", text.bytes)
+    try io.write_all(sink, text.bytes)
+
+func imap(stream: tls_stream.Stream*, greeted: bool) -> !:
+    if not greeted:
+        try read_until(stream, "* ")
+    try send(stream, "a1 CAPABILITY\r\n")
+    try read_until(stream, "a1 ")
+    try send(stream, "a2 LOGOUT\r\n")
+    try read_until(stream, "a2 ")
+
+func smtp(stream: tls_stream.Stream*, greeted: bool) -> !:
+    if not greeted:
+        try read_smtp(stream)
+    try send(stream, "EHLO luce-tls.invalid\r\n")
+    try read_smtp(stream)
+    try send(stream, "QUIT\r\n")
+    try read_smtp(stream)
+
+func run(mode: str, host: str, port: u16) -> !:
+    let deadline = try net.Deadline.after(30000000000)
+    let implicit = mode == "imaps" or mode == "smtps" or mode == "https"
+    var stream = try tls_stream.Stream.connect(host, port, implicit, deadline)
+    defer discard(stream.close() catch: recover ())
+    if mode == "imaps":
+        try imap(&stream, false)
+    elif mode == "smtps":
+        try smtp(&stream, false)
+    elif mode == "https":
+        try send(&stream, "HEAD / HTTP/1.1\r\nHost: ")
+        try send(&stream, host)
+        try send(&stream, "\r\nConnection: close\r\n\r\n")
+        var line: u8[4096]
+        let size = try read_line(&stream, line)
+        show("  S: ", line[..<size])
+    elif mode == "imap-starttls":
+        try read_until(&stream, "* ")
+        try send(&stream, "a0 STARTTLS\r\n")
+        try read_until(&stream, "a0 ")
+        try stream.start_tls(host)
+        try imap(&stream, true)
+    elif mode == "smtp-starttls":
+        try read_smtp(&stream)
+        try send(&stream, "EHLO luce-tls.invalid\r\n")
+        try read_smtp(&stream)
+        try send(&stream, "STARTTLS\r\n")
+        try read_smtp(&stream)
+        try stream.start_tls(host)
+        try smtp(&stream, true)
+    else:
+        error(tls_stream.invalid, "unknown mode")
+
+pub func main(arguments: str[]) -> i32:
+    if arguments.length != 4:
+        print("usage: live_smoke MODE HOST PORT")
+        return 2
+    var port: u16 = 0
+    for character in arguments[3]:
+        port = port * 10 + (u16)((u32)character - 48)
+    run(arguments[1], arguments[2], port) catch failure:
+        print(f"FAIL {arguments[2]}:{port}: {failure.message}")
+        return 1
+    print(f"OK {arguments[2]}:{port}")
+    return 0

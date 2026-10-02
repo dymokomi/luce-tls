@@ -1,9 +1,12 @@
-## Loopback tests for TlsStream: Reader/Writer use, fragmentation, pending
-## plaintext and readiness, deadline timeouts that resume, STARTTLS upgrade
-## and close_notify.
+## Loopback tests for tls_stream.Stream: TLS on connect through Reader/Writer
+## views, fragmentation, pending plaintext and readiness, a deadline timeout
+## that resumes, cancellation from another thread, a plain exchange followed by
+## an in-place STARTTLS upgrade (answering a CertificateRequest), close_notify
+## and a wrong pin.
 import io
 import net
 import c
+import sync
 import thread
 import crypto_native
 import tls_stream
@@ -20,6 +23,7 @@ var g_port: @u64
 var g_ready: @u64
 var g_step: @u64
 var g_result: @u64
+var g_cancel: sync.Cancellation
 
 ## LUCE-BUG: an `@u64*` parameter cannot be loaded and `&g_x` of an `@u64`
 ## global does not convert to it (luce-base af3980f), so each flag gets a
@@ -50,8 +54,11 @@ func serve(conn: net.Connection*) -> !:
     try channel.write_application(conn, big)
     # One record carrying six bytes, for pending().
     try channel.write_application(conn, b"abcdef")
-    # Wait until the client has timed out once, then answer.
+    # After the client's timed-out read, cancel its next blocked read.
     wait_for(1, 1)
+    thread.sleep(50)
+    g_cancel.request()
+    wait_for(1, 2)
     try channel.write_application(conn, b"late")
     # Expect close_notify.
     var tail: u8[16]
@@ -72,8 +79,9 @@ func serve_starttls(conn: net.Connection*) -> !:
     if used != 12 or line[0] != 'a':
         error(record.invalid, "expected a1 STARTTLS")
     try io.write_all(conn, b"a1 OK go\r\n")
+    # Also ask for a client certificate, which the client answers empty.
     var channel = record.Channel()
-    try server.accept(&channel, conn, conn, g_cert[..<g_cert_n], g_d)
+    try server.accept(&channel, conn, conn, g_cert[..<g_cert_n], g_d, request_certificate = true)
     var buffer: u8[64]
     let n = try channel.read_application(conn, buffer)
     try channel.write_application(conn, buffer[..<n])
@@ -110,26 +118,14 @@ func server_main(raw: void*?):
         recover ()
     discard(rejected.close() catch: recover ())
 
-func read_text(stream: io.Reader, count: usize, out: u8[]) -> !:
-    try io.read_exact(stream, out[..<count])
-
 func expect_text(actual: const u8[], expected: const u8[]):
     assert(actual.length == expected.length)
     for i in 0..<actual.length:
         assert(actual[i] == expected[i])
 
-pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
-    try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
-    g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
-    var worker = try thread.spawn(server_main, none, name = "tls-stream-server")
-    defer worker.join() catch failure:
-        discard(failure)
-    wait_for(0, 1)
-    assert(g_ready.load(.acquire) == 1)
-    let port = (u16)g_port.load(.acquire)
-    let pinned = try tls_stream.Trust.pinned_issuer(g_qx, g_qy)
-    var stream = try tls_stream.TlsStream.connect("localhost", port, pinned)
+func implicit_tls(port: u16, pinned: tls_stream.Trust) -> !:
+    var stream = try tls_stream.Stream.connect("localhost", port, true, policy = pinned)
+    assert(stream.is_secure())
     # Reader/Writer views: a 40000-byte echo crosses several records.
     var big: u8[40000]
     for i in 0..<big.length:
@@ -158,38 +154,63 @@ pub func main(arguments: str[]) -> i32!:
         timed_out = true
         recover 0)
     assert(timed_out)
-    g_step.store(1, .release)
     stream.set_deadline(net.Deadline())
+    # Another thread cancels a read that would block indefinitely.
+    g_step.store(1, .release)
+    var cancelled = false
+    discard(stream.read_within(late, net.Deadline(), &g_cancel) catch failure:
+        assert(failure.code == net.cancelled)
+        cancelled = true
+        recover 0)
+    assert(cancelled)
+    g_step.store(2, .release)
     try io.read_exact(&stream, late)
     expect_text(late, b"late")
     try stream.close()
     try stream.close()
-    # STARTTLS: plaintext exchange, then upgrade the same connection.
+
+func starttls(port: u16, pinned: tls_stream.Trust) -> !:
     let address = try net.resolve((c.str)"localhost", port)
-    var plain = try net.Connection.connect(address)
+    var stream = tls_stream.Stream.plain(try net.Connection.connect(address))
+    assert(not stream.is_secure())
     var greeting: u8[12]
-    try io.read_exact(&plain, greeting)
+    try io.read_exact(&stream, greeting)
     expect_text(greeting, b"* OK ready\r\n")
-    try io.write_all(&plain, b"a1 STARTTLS\n")
+    try io.write_all(&stream, b"a1 STARTTLS\n")
     var reply: u8[10]
-    try io.read_exact(&plain, reply)
+    try io.read_exact(&stream, reply)
     expect_text(reply, b"a1 OK go\r\n")
-    var upgraded = try tls_stream.TlsStream.upgrade(plain, "localhost", pinned)
-    try io.write_all(&upgraded, b"a2 NOOP\r\n")
+    try stream.start_tls("localhost", pinned)
+    assert(stream.is_secure())
+    try io.write_all(&stream, b"a2 NOOP\r\n")
     var echo: u8[9]
-    try io.read_exact(&upgraded, echo)
+    try io.read_exact(&stream, echo)
     expect_text(echo, b"a2 NOOP\r\n")
-    try upgraded.close()
+    try stream.close()
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
+    g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
+    var worker = try thread.spawn(server_main, none, name = "tls-stream-server")
+    defer worker.join() catch failure:
+        discard(failure)
+    wait_for(0, 1)
+    assert(g_ready.load(.acquire) == 1)
+    let port = (u16)g_port.load(.acquire)
+    let pinned = try tls_stream.Trust.pinned_issuer(g_qx, g_qy)
+    try implicit_tls(port, pinned)
+    try starttls(port, pinned)
     wait_for(2, 1)
     assert(g_result.load(.acquire) == 1)
     # A wrong pin must fail the handshake.
     let wrong = try tls_stream.Trust.pinned_issuer(g_qy, g_qx)
     var refused = false
-    var bad = tls_stream.TlsStream.connect("localhost", port, wrong) catch failure:
+    var bad = tls_stream.Stream.connect("localhost", port, true, policy = wrong) catch failure:
         discard(failure)
         refused = true
-        recover tls_stream.TlsStream()
+        recover tls_stream.Stream()
     assert(refused)
     try bad.close()
-    print("PASS TlsStream Reader/Writer, pending, deadlines, STARTTLS and close_notify")
+    print("PASS Stream TLS and plain I/O, pending, deadlines, cancellation, STARTTLS and close_notify")
     return 0

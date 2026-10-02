@@ -1,6 +1,6 @@
 ## The connection-plus-state TLS API: the caller owns a `net.Connection` and a
 ## `Secrets` (the record channel) and passes both to `send`/`receive`. These
-## calls block on the connection. New code should prefer `tls_stream.TlsStream`,
+## calls block on the connection. New code should prefer `tls_stream.Stream`,
 ## which owns both, implements io.Reader/io.Writer and supports deadlines.
 import net
 import c

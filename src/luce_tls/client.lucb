@@ -2,8 +2,8 @@
 ## ClientHello with SNI, an optional HelloRetryRequest round, the encrypted
 ## server flight, certificate authentication under a Trust policy, and the
 ## client Finished. On success the channel holds application traffic keys.
-## Out of scope: PSK resumption, 0-RTT and client certificates (a server that
-## sends CertificateRequest fails the handshake).
+## Out of scope: PSK resumption, 0-RTT and client certificates (a
+## CertificateRequest is answered with an empty Certificate, RFC 8446 §4.4.2).
 import io
 import os
 import time
@@ -37,6 +37,9 @@ struct Hello:
     var session: u8[32]
     var host: str
     var alpn: str
+    var certificate_requested: bool
+    var request_context: u8[255]
+    var request_context_size: usize
 
 ## Run the client handshake for `host` on an already connected transport.
 ## `source` and `sink` usually view the same connection. `now` is the Unix time
@@ -98,7 +101,7 @@ pub func connect(channel: record.Channel*, source: io.Reader, sink: io.Writer, h
     defer crypto.wipe(client_secret)
     defer crypto.wipe(server_secret)
     try schedule.enter_application(client_secret, server_secret)
-    try client_flight(channel, sink, &schedule, suite)
+    try client_flight(channel, sink, &schedule, &hello, suite)
     try channel.start_application(suite, server_secret[..<suite.hash_size], client_secret[..<suite.hash_size])
 
 ## Whether `group` is one the client listed in supported_groups.
@@ -284,7 +287,7 @@ func parse_share(value: const u8[], out: ServerHello*) -> !:
 
 ## Process EncryptedExtensions through server Finished.
 func server_flight(channel: record.Channel*, source: io.Reader, messages: hs.Messages*, schedule: hs.Schedule*,
-    hello: const Hello*, policy: const trust.Trust*, now: i64) -> !:
+    hello: Hello*, policy: const trust.Trust*, now: i64) -> !:
     var message = try messages.next(channel, source)
     if message[0] != hs.encrypted_extensions:
         error(invalid, "expected EncryptedExtensions")
@@ -292,7 +295,9 @@ func server_flight(channel: record.Channel*, source: io.Reader, messages: hs.Mes
     try schedule.add(message)
     message = try messages.next(channel, source)
     if message[0] == hs.certificate_request:
-        error(invalid, "the server requires a client certificate")
+        try note_certificate_request(message, hello)
+        try schedule.add(message)
+        message = try messages.next(channel, source)
     if message[0] != hs.certificate:
         error(invalid, "expected the server Certificate")
     let at = now if now != 0 else time.unix()
@@ -319,6 +324,19 @@ func server_flight(channel: record.Channel*, source: io.Reader, messages: hs.Mes
     if not messages.empty():
         error(invalid, "unexpected handshake data after server Finished")
 
+## Remember a CertificateRequest's context; the client answers it with an
+## empty certificate list. Its extensions are not interpreted.
+func note_certificate_request(message: const u8[], hello: Hello*) -> !:
+    if message.length < 5 or hs.message_length(message) != message.length - 4:
+        error(invalid, "malformed CertificateRequest")
+    let size = (usize)message[4]
+    if message.length - 5 < size + 2 or (usize)u16_at(message, 5 + size) != message.length - 7 - size:
+        error(invalid, "malformed CertificateRequest")
+    for i in 0..<size:
+        hello.request_context[i] = message[5 + i]
+    hello.request_context_size = size
+    hello.certificate_requested = true
+
 ## EncryptedExtensions must be well formed; a selected ALPN protocol must be
 ## exactly the one offered.
 func check_encrypted_extensions(message: const u8[], hello: const Hello*) -> !:
@@ -344,11 +362,23 @@ func check_encrypted_extensions(message: const u8[], hello: const Hello*) -> !:
             error(invalid, "EncryptedExtensions carries a ServerHello-only extension")
         at += size
 
-## Send change_cipher_spec (middlebox compatibility) and the client Finished.
-func client_flight(channel: record.Channel*, sink: io.Writer, schedule: hs.Schedule*, suite: record.Suite) -> !:
+## Send change_cipher_spec (middlebox compatibility), an empty Certificate
+## when one was requested, and the client Finished.
+func client_flight(channel: record.Channel*, sink: io.Writer, schedule: hs.Schedule*, hello: const Hello*, suite: record.Suite) -> !:
     let ccs = b"\x01"
     try channel.send(sink, record.change_cipher_spec, ccs)
     try channel.protect_write(suite, schedule.handshake_secret(true))
+    if hello.certificate_requested:
+        var empty: u8[264]
+        var b = hs.Builder.over(empty)
+        b.put8(hs.certificate)
+        let body = b.open(3)
+        b.put8((u8)hello.request_context_size)
+        b.put(hello.request_context[..<hello.request_context_size])
+        discard(b.open(3))
+        b.close(body, 3)
+        try schedule.add(empty[..<b.size()])
+        try channel.send(sink, record.handshake, empty[..<b.size()])
     var verify: u8[48]
     try schedule.finished_value(schedule.handshake_secret(true), verify[..<suite.hash_size])
     var message: u8[52]
