@@ -71,6 +71,8 @@ func run(mode: str, host: str, port: u16) -> !:
     let implicit = mode == "imaps" or mode == "smtps" or mode == "https"
     var stream = try tls_stream.Stream.connect(host, port, implicit, deadline)
     defer discard(stream.close() catch: recover ())
+    if implicit:
+        print(f"  TLS 1.3 cipher suite {hex(stream.cipher_suite())}")
     if mode == "imaps":
         try imap(&stream, false)
     elif mode == "smtps":
@@ -87,6 +89,7 @@ func run(mode: str, host: str, port: u16) -> !:
         try send(&stream, "a0 STARTTLS\r\n")
         try read_until(&stream, "a0 ")
         try stream.start_tls(host)
+        print(f"  TLS 1.3 cipher suite {hex(stream.cipher_suite())}")
         try imap(&stream, true)
     elif mode == "smtp-starttls":
         try read_smtp(&stream)
@@ -95,6 +98,7 @@ func run(mode: str, host: str, port: u16) -> !:
         try send(&stream, "STARTTLS\r\n")
         try read_smtp(&stream)
         try stream.start_tls(host)
+        print(f"  TLS 1.3 cipher suite {hex(stream.cipher_suite())}")
         try smtp(&stream, true)
     else:
         error(tls_stream.invalid, "unknown mode")

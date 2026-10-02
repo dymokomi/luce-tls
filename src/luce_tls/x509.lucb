@@ -1,8 +1,7 @@
-## A minimal X.509 (DER) reader for the certificates this client meets: it extracts
-## the signed TBS bytes, the ECDSA signature, the subject EC public key, the
-## SubjectAltName DNS entries, and the validity window. It validates a certificate
-## against an already-trusted issuer key (ECDSA-P256 over SHA-256) and matches a
-## hostname; it is not a general X.509 path builder.
+## Private-endpoint certificates: `mint_self_signed` makes a P-256 certificate
+## for a host, and a minimal reader checks such a certificate against an issuer
+## key (ECDSA-P256 over SHA-256) and a host name. Public certificate validation
+## lives in `certificate` and `chain`.
 import crypto_native
 from luce_tls.tls import hostname_matches
 

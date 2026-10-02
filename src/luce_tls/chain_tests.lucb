@@ -1,7 +1,9 @@
 ## The exact public certificate path served by the existing Lucia OS Caddy VPS
-## on 2026-09-19. The leaf is intentionally checked at a fixed instant inside
-## its validity interval so this regression remains deterministic.
+## on 2026-09-19, validated at a fixed instant inside the leaf's validity, under
+## an explicit ISRG Root X2 key and under the bundled Mozilla roots.
+import luce_tls.anchors as anchors
 import luce_tls.chain as chain
+import luce_tls.signature as signature
 
 let leaf_b64 = b"MIIDhzCCAw2gAwIBAgISBrXrC9fGRoHRRpb9ZWQZ70PRMAoGCCqGSM49BAMDMDMxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTIwHhcNMjYwODE3MTEyODI4WhcNMjYxMTE1MTEyODI3WjAXMRUwEwYDVQQDEwxraW5vZ2FraS5jb20wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAS+QxSgLLPiu6Cg4LXl2KTrt4/8BQJ+pS7tspOF53Cdwln14jguHhtkTR4LQO+X29YlSo1BFzQI8ArudSqQkIq7o4ICGzCCAhcwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFFBgCA/pAzp5WwI0n1HSXuknTKABMB8GA1UdIwQYMBaAFLlZ8o7PIvCG0zdI/3YUGLqC2FWHMDMGCCsGAQUFBwEBBCcwJTAjBggrBgEFBQcwAoYXaHR0cDovL3llMi5pLmxlbmNyLm9yZy8wFwYDVR0RBBAwDoIMa2lub2dha2kuY29tMBMGA1UdIAQMMAowCAYGZ4EMAQIBMC4GA1UdHwQnMCUwI6AhoB+GHWh0dHA6Ly95ZTIuYy5sZW5jci5vcmcvODIuY3JsMIIBDQYKKwYBBAHWeQIEAgSB/gSB+wD5AHYAyKPEf8ezrbk1awE/anoSbeM6TkOlxkb5l605dZkdz5oAAAGgD7B6WwAABAMARzBFAiASHXOCDjFTXU+19AiseDRcAzmUemEhhq9hN4IO72Z5SwIhALA4+gIW74uhjBxgb5Zy3L51X9mSC+2gVMiPnJ2arLlCAH8ARq+GPTs+5Z+ld96oJF02sNntIqIj9GF3QSKUUu6VUF8AAAGgD7B60AAIAAAFABTn4xUEAwBIMEYCIQDKITcVq4ym5+5BIlChMFnbSBpShUZT55qS/jTCSGW1+gIhALVjMXRq2pp8Raf2C6KCNjlSbVo39s8TXUedZ0o5sMgXMAoGCCqGSM49BAMDA2gAMGUCMQD+Amm7TI2XQtxsi0XkgxVULRibXffXNWe0Q+yl8d8Ccsn+h/LHzL1KfGqOlpD3JHcCMB3Na9EHYnod4j+82qTT1S09YTtoNW24niwe2BMc4/AT02IHbjvGlEWCqWukZwbznQ=="
 let ye2_b64 = b"MIICjDCCAhGgAwIBAgIQTfOxXdbAeExQfNN7WObxFTAKBggqhkjOPQQDAzAuMQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTAeFw0yNTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTIwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAARxmrQzkdbEEL3MqXt3dJQttYc47axkdDTHud5TPqM2z5uSD5cmk0WrHlWXvnlvqBLqiB34kluxIbmMyAiq3/YD6e80/vV259K8XQIdjFXloYOa0mIU71f7HQ09PvYDlw+jge4wgeswDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFLlZ8o7PIvCG0zdI/3YUGLqC2FWHMB8GA1UdIwQYMBaAFKPIJlqOoUzQNWP8myPIOq5W809WMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEFBQcwAoYWaHR0cDovL3llLmkubGVuY3Iub3JnLzATBgNVHSAEDDAKMAgGBmeBDAECATAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veWUuYy5sZW5jci5vcmcvMAoGCCqGSM49BAMDA2kAMGYCMQDIcnw5dcZLN9ffynXnnkLD/itSJEycJPb3sRkzeqBowup7vOsAwaqoCnNn/jh9wycCMQCJM6CPlaOC4pQYYbJtVPYbDKrIb2EKk5NpOpE6/XttQYZV/3gilB9l+Cc/DOVwmyg="
@@ -77,15 +79,9 @@ func make_message(message: u8[], leaf: const u8[], ye2: const u8[], root_ye: con
     put_u24(message, &patch, at - 4)
     return at
 
-func rejected(message: const u8[], host: str, now: i64, root_x: const u8[], root_y: const u8[]) -> bool:
-    var x: u8[32]
-    var y: u8[32]
-    var failed = false
-    chain.verify_server_chain(message, host, now, root_x, root_y, x, y) catch failure:
-        discard(failure)
-        failed = true
-        recover ()
-    return failed
+func rejected(message: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> bool:
+    discard(chain.verify_server_chain(message, host, now, trusted) catch: return true)
+    return false
 
 func find_bytes(haystack: const u8[], needle: const u8[]) -> usize!:
     if needle.length == 0 or needle.length > haystack.length:
@@ -109,44 +105,50 @@ pub func main(arguments: str[]) -> i32!:
     let x2_n = try decode(x2_cross_b64, x2)
     var message: u8[8192]
     let full_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
-    var key_x: u8[32]
-    var key_y: u8[32]
     let inside_window: i64 = 1789885378
-    try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window,
-        chain.isrg_root_x2_x, chain.isrg_root_x2_y, key_x, key_y)
-    assert(key_x[0] == 0xbe and key_y[31] == 0xbb)
-    assert(rejected(message[..<full_n], "pkg.luciaos.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
-    assert(rejected(message[..<full_n], "kinogaki.com", 1700000000, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
-    assert(rejected(message[..<full_n], "kinogaki.com", 1800000000, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    let pinned = anchors.Anchors.single(try signature.PublicKey.p384(chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    let mozilla = anchors.Anchors.mozilla()
+    let key = try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window, &pinned)
+    var x: u8[32]
+    var y: u8[32]
+    try key.p256_point(x, y)
+    assert(x[0] == 0xbe and y[31] == 0xbb)
+    discard(try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window, &mozilla))
+    assert(rejected(message[..<full_n], "pkg.luciaos.com", inside_window, &pinned))
+    assert(rejected(message[..<full_n], "kinogaki.com", 1700000000, &pinned))
+    assert(rejected(message[..<full_n], "kinogaki.com", 1800000000, &pinned))
     var wrong: u8[48]
     for i in 0..<48: wrong[i] = chain.isrg_root_x2_x[i]
     wrong[0] ^= 1
-    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, wrong, chain.isrg_root_x2_y))
+    let other = anchors.Anchors.single(try signature.PublicKey.p384(wrong, chain.isrg_root_x2_y))
+    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, &other))
     # The anchor may be omitted from a TLS path; Root YE is signed directly by it.
     let short_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], false)
-    try chain.verify_server_chain(message[..<short_n], "kinogaki.com", inside_window,
-        chain.isrg_root_x2_x, chain.isrg_root_x2_y, key_x, key_y)
+    discard(try chain.verify_server_chain(message[..<short_n], "kinogaki.com", inside_window, &pinned))
     # Mutating an authenticated leaf signature must fail.
     leaf[leaf_n - 1] ^= 1
     let bad_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
-    assert(rejected(message[..<bad_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(rejected(message[..<bad_n], "kinogaki.com", inside_window, &pinned))
     leaf[leaf_n - 1] ^= 1
-    # Reordered and duplicate certificate paths are rejected before trust.
+    # Path building is order independent and ignores duplicates.
     let reordered_n = make_message(message, leaf[..<leaf_n], root_ye[..<root_ye_n], ye2[..<ye2_n], x2[..<x2_n], true)
-    assert(rejected(message[..<reordered_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
-    let duplicate_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], x2[..<x2_n], true)
-    assert(rejected(message[..<duplicate_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    discard(try chain.verify_server_chain(message[..<reordered_n], "kinogaki.com", inside_window, &pinned))
+    let duplicate_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], root_ye[..<root_ye_n], true)
+    discard(try chain.verify_server_chain(message[..<duplicate_n], "kinogaki.com", inside_window, &pinned))
+    # Without Root YE there is no path to the anchor.
+    let missing_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], x2[..<x2_n], true)
+    assert(rejected(message[..<missing_n], "kinogaki.com", inside_window, &pinned))
     # A critical extension that the validator does not understand must reject.
     let key_usage_marker = b"\x06\x03\x55\x1d\x0f\x01\x01\xff"
     let key_usage_at = try find_bytes(leaf[..<leaf_n], key_usage_marker)
     leaf[key_usage_at + 4] ^= 1
     let critical_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
-    assert(rejected(message[..<critical_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(rejected(message[..<critical_n], "kinogaki.com", inside_window, &pinned))
     leaf[key_usage_at + 4] ^= 1
     # Non-empty CertificateEntry extensions were not requested by this client.
     discard(make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true))
     message[8 + leaf_n] = 1
-    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
-    assert(rejected(message[..<full_n - 1], "kinogaki.com", inside_window, chain.isrg_root_x2_x, chain.isrg_root_x2_y))
-    print("PASS strict P-384 public certificate-chain validation")
+    assert(rejected(message[..<full_n], "kinogaki.com", inside_window, &pinned))
+    assert(rejected(message[..<full_n - 1], "kinogaki.com", inside_window, &pinned))
+    print("PASS Let's Encrypt chain under a pinned root and the Mozilla roots, with negative cases")
     return 0

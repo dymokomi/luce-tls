@@ -1,0 +1,143 @@
+## Captured certificate chains of real mail servers (tests/chains/, written by
+## tools/capture_chains.py), validated against the bundled Mozilla roots at
+## each capture instant, plus negative cases: wrong host, expired, not yet
+## valid, untrusted root, broken leaf and intermediate signatures, and a
+## missing intermediate. Reordered intermediates must still validate.
+import c
+import files
+import luce_tls.anchors as anchors
+import luce_tls.chain as chain
+import luce_tls.signature as signature
+
+let fixtures: str[9] = ["imap.gmail.com-993.txt", "smtp.gmail.com-465.txt", "smtp.gmail.com-587.txt",
+    "imap.mail.me.com-993.txt", "smtp.mail.me.com-587.txt", "outlook.office365.com-993.txt",
+    "smtp.office365.com-587.txt", "imap.fastmail.com-993.txt", "smtp.fastmail.com-465.txt"]
+
+## One captured chain: host, capture time and certificates.
+struct Fixture:
+    var host: u8[128]
+    var host_size: usize
+    var now: i64
+    var certificates: u8[32768]
+    var start: usize[10]
+    var size: usize[10]
+    var count: usize
+
+    func host_name() -> str:
+        return (str)self.host[..<self.host_size]
+
+    func der(i: usize) -> const u8[]:
+        return self.certificates[self.start[i]..<self.start[i] + self.size[i]]
+
+func nibble(digit: u8) -> u8!:
+    if digit >= '0' and digit <= '9': return digit - '0'
+    if digit >= 'a' and digit <= 'f': return digit - 'a' + 10
+    error(chain.invalid, "fixture is not lowercase hex")
+
+func load(directory: str, name: str, fixture: Fixture*) -> !:
+    var path: u8[512]
+    for i in 0..<directory.length:
+        path[i] = directory.bytes[i]
+    path[directory.length] = '/'
+    for i in 0..<name.length:
+        path[directory.length + 1 + i] = name.bytes[i]
+    let path_size = directory.length + 1 + name.length
+    path[path_size] = 0
+    let text = try files.read((c.str)(str)path[..<path_size])
+    defer free(text)
+    var at: usize = 0
+    var used: usize = 0
+    while at < text.length:
+        var end = at
+        while end < text.length and text[end] != '\n':
+            end += 1
+        let line = text[at..<end]
+        if line.length > 5 and line[0] == 'h':
+            for i in 5..<line.length:
+                fixture.host[i - 5] = line[i]
+            fixture.host_size = line.length - 5
+        elif line.length > 4 and line[0] == 'n':
+            for i in 4..<line.length:
+                fixture.now = fixture.now * 10 + (i64)(line[i] - '0')
+        elif line.length > 5 and line[0] == 'c':
+            let size = (line.length - 5) // 2
+            fixture.start[fixture.count] = used
+            fixture.size[fixture.count] = size
+            for i in 0..<size:
+                fixture.certificates[used + i] = (try nibble(line[5 + 2 * i]) << 4) | try nibble(line[6 + 2 * i])
+            used += size
+            fixture.count += 1
+        at = end + 1
+
+func put_u24(out: u8[], at: usize, value: usize):
+    out[at] = (u8)(value >> 16)
+    out[at + 1] = (u8)((value >> 8) & 0xff)
+    out[at + 2] = (u8)(value & 0xff)
+
+## A Certificate handshake message holding the fixture's certificates in the
+## order of `order` (indexes into the fixture).
+func message(fixture: const Fixture*, order: const usize[], out: u8[]) -> usize:
+    out[0] = 11
+    out[4] = 0
+    var at: usize = 8
+    for i in 0..<order.length:
+        let der = fixture.der(order[i])
+        put_u24(out, at, der.length)
+        for j in 0..<der.length:
+            out[at + 3 + j] = der[j]
+        at += 3 + der.length
+        out[at] = 0
+        out[at + 1] = 0
+        at += 2
+    put_u24(out, 1, at - 4)
+    put_u24(out, 5, at - 8)
+    return at
+
+func accepted(bytes: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> bool:
+    discard(chain.verify_server_chain(bytes, host, now, trusted) catch: return false)
+    return true
+
+func check(fixture: Fixture*) -> !:
+    let mozilla = anchors.Anchors.mozilla()
+    var all: usize[10]
+    for i in 0..<fixture.count:
+        all[i] = i
+    var buffer: u8[40000]
+    let host = fixture.host_name()
+    var size = message(fixture, all[..<fixture.count], buffer)
+    let key = try chain.verify_server_chain(buffer[..<size], host, fixture.now, &mozilla)
+    assert(key.kind != signature.key_none)
+    assert(not accepted(buffer[..<size], "evil.example.com", fixture.now, &mozilla), "wrong host accepted")
+    assert(not accepted(buffer[..<size], host, fixture.now + 400 * 86400, &mozilla), "expired chain accepted")
+    assert(not accepted(buffer[..<size], host, fixture.now - 400 * 86400, &mozilla), "future chain accepted")
+    let unrelated = anchors.Anchors.single(try signature.PublicKey.p384(chain.isrg_root_x2_x, chain.isrg_root_x2_y))
+    assert(not accepted(buffer[..<size], host, fixture.now, &unrelated), "untrusted root accepted")
+    # Intermediates in reverse order still form the same path.
+    var reversed: usize[10]
+    reversed[0] = 0
+    for i in 1..<fixture.count:
+        reversed[i] = fixture.count - i
+    size = message(fixture, reversed[..<fixture.count], buffer)
+    assert(accepted(buffer[..<size], host, fixture.now, &mozilla), "reordered chain rejected")
+    # Without its intermediate the leaf has no path (no AIA fetching).
+    size = message(fixture, all[..<1], buffer)
+    assert(not accepted(buffer[..<size], host, fixture.now, &mozilla), "chain without intermediate accepted")
+    # A flipped bit in the leaf or the first intermediate signature fails.
+    for victim in 0..<2:
+        let last = fixture.start[victim] + fixture.size[victim] - 1
+        fixture.certificates[last] ^= 1
+        size = message(fixture, all[..<fixture.count], buffer)
+        assert(not accepted(buffer[..<size], host, fixture.now, &mozilla), "broken signature accepted")
+        fixture.certificates[last] ^= 1
+
+## Optional argument: the fixture directory (default tests/chains).
+pub func main(arguments: str[]) -> i32!:
+    let directory = arguments[1] if arguments.length > 1 else "tests/chains"
+    for i in 0..<fixtures.length:
+        var fixture = Fixture()
+        try load(directory, fixtures[i], &fixture)
+        check(&fixture) catch failure:
+            print(f"{fixtures[i]}: {failure.message}")
+            error(failure.code, failure.message)
+    print("PASS captured Gmail, iCloud, Outlook and Fastmail chains with negative cases")
+    return 0

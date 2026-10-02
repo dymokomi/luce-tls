@@ -1,0 +1,48 @@
+## Trust anchors for certificate path validation: the bundled Mozilla root
+## set (generated into roots.lucb) or one explicit public key. A bundled anchor
+## is a subject Name with its key; an explicit key matches any issuer name and
+## is trusted for whatever certificate its signature verifies.
+import luce_tls.roots as roots
+import luce_tls.signature as signature
+
+## A set of trust anchors.
+pub struct Anchors:
+    var bundled: bool
+    var key: signature.PublicKey
+
+    ## The Mozilla roots trusted for TLS server authentication.
+    pub static func mozilla() -> Anchors:
+        return Anchors(bundled = true)
+
+    ## A single explicit key, for private servers or pinned public roots.
+    pub static func single(key: signature.PublicKey) -> Anchors:
+        return Anchors(key = key)
+
+    ## The number of anchors.
+    pub func count() -> usize:
+        if self.bundled:
+            return roots.count
+        return 1
+
+    ## The subject Name of anchor `i`; empty for an explicit key.
+    pub func subject(i: usize) -> const u8[]:
+        if not self.bundled:
+            return b""
+        let start = (usize)roots.index[i * 7]
+        return roots.data[start..<start + (usize)roots.index[i * 7 + 1]]
+
+    ## The public key of anchor `i`.
+    pub func key_at(i: usize) -> signature.PublicKey!:
+        if not self.bundled:
+            return self.key
+        let row = i * 7
+        let a_start = (usize)roots.index[row + 3]
+        let a = roots.data[a_start..<a_start + (usize)roots.index[row + 4]]
+        let b_start = (usize)roots.index[row + 5]
+        let b = roots.data[b_start..<b_start + (usize)roots.index[row + 6]]
+        let kind = roots.index[row + 2]
+        if kind == 1:
+            return try signature.PublicKey.p256(a, b)
+        if kind == 2:
+            return try signature.PublicKey.p384(a, b)
+        return try signature.PublicKey.rsa(a, b)

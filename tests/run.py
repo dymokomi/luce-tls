@@ -15,6 +15,7 @@ SOURCES = [
     ("src/luce_tls/handshake_tests.lucb", "handshake-tests"),
     ("src/luce_tls/x509_tests.lucb", "x509-tests"),
     ("src/luce_tls/chain_tests.lucb", "chain-tests"),
+    ("src/luce_tls/mail_chain_tests.lucb", "mail-chain-tests"),
 ]
 
 

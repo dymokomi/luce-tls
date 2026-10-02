@@ -1,0 +1,366 @@
+## A strict X.509 v3 certificate parser (RFC 5280) for TLS path validation.
+## It records byte ranges into the DER rather than copying: the signed TBS, the
+## signature algorithm and value, issuer and subject Names, validity, the
+## subject public key, and the extensions path validation uses (basic
+## constraints, key usage, extended key usage, subject alternative names).
+## Unknown critical extensions and name constraints are rejected; policy
+## extensions are accepted but not processed.
+import luce_tls.der as der
+import luce_tls.signature as signature
+
+pub let invalid = der.invalid
+pub let max_certificate_bytes: usize = 16384
+
+## A parsed certificate; ranges index the DER it was parsed from.
+pub struct Certificate:
+    pub var tbs_start: usize
+    pub var tbs_end: usize
+    pub var algorithm: u8
+    pub var signature_start: usize
+    pub var signature_end: usize
+    pub var issuer_start: usize
+    pub var issuer_end: usize
+    pub var subject_start: usize
+    pub var subject_end: usize
+    pub var not_before: i64
+    pub var not_after: i64
+    pub var key_kind: u8
+    var key_a_start: usize
+    var key_a_end: usize
+    var key_b_start: usize
+    var key_b_end: usize
+    pub var san_start: usize
+    pub var san_end: usize
+    pub var basic_present: bool
+    pub var is_ca: bool
+    pub var path_len_present: bool
+    pub var path_len: usize
+    pub var key_usage_present: bool
+    pub var digital_signature: bool
+    pub var key_cert_sign: bool
+    pub var eku_present: bool
+    pub var server_auth: bool
+
+    ## The subject public key.
+    pub func public_key(bytes: const u8[]) -> signature.PublicKey!:
+        let a = bytes[self.key_a_start..<self.key_a_end]
+        let b = bytes[self.key_b_start..<self.key_b_end]
+        if self.key_kind == signature.key_p256:
+            return try signature.PublicKey.p256(a, b)
+        if self.key_kind == signature.key_p384:
+            return try signature.PublicKey.p384(a, b)
+        return try signature.PublicKey.rsa(a, b)
+
+    ## The issuer Name as encoded.
+    pub func issuer(bytes: const u8[]) -> const u8[]:
+        return bytes[self.issuer_start..<self.issuer_end]
+
+    ## The subject Name as encoded.
+    pub func subject(bytes: const u8[]) -> const u8[]:
+        return bytes[self.subject_start..<self.subject_end]
+
+    ## Whether issuer and subject are the same Name (RFC 5280 self-issued).
+    pub func self_issued(bytes: const u8[]) -> bool:
+        return der.same(self.issuer(bytes), self.subject(bytes))
+
+    ## Whether `now` lies within the validity period, inclusive.
+    pub func valid_at(now: i64) -> bool:
+        return now >= self.not_before and now <= self.not_after
+
+    ## Verify this certificate's signature with the issuer's key.
+    pub func signed_by(bytes: const u8[], key: const signature.PublicKey*) -> bool!:
+        return try signature.verify(key, self.algorithm, bytes[self.tbs_start..<self.tbs_end],
+            bytes[self.signature_start..<self.signature_end])
+
+## Object identifiers (content bytes).
+let oid_sha256_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0b"
+let oid_sha384_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0c"
+let oid_sha512_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0d"
+let oid_rsa_pss = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0a"
+let oid_mgf1 = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x08"
+let oid_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01"
+let oid_ecdsa_sha256 = b"\x2a\x86\x48\xce\x3d\x04\x03\x02"
+let oid_ecdsa_sha384 = b"\x2a\x86\x48\xce\x3d\x04\x03\x03"
+let oid_ecdsa_sha512 = b"\x2a\x86\x48\xce\x3d\x04\x03\x04"
+let oid_ec_public = b"\x2a\x86\x48\xce\x3d\x02\x01"
+let oid_p256 = b"\x2a\x86\x48\xce\x3d\x03\x01\x07"
+let oid_p384 = b"\x2b\x81\x04\x00\x22"
+let oid_sha256 = b"\x60\x86\x48\x01\x65\x03\x04\x02\x01"
+let oid_sha384 = b"\x60\x86\x48\x01\x65\x03\x04\x02\x02"
+let oid_sha512 = b"\x60\x86\x48\x01\x65\x03\x04\x02\x03"
+let oid_server_auth = b"\x2b\x06\x01\x05\x05\x07\x03\x01"
+let oid_any_eku = b"\x55\x1d\x25\x00"
+
+## Parse an AlgorithmIdentifier for a certificate signature, returning the
+## signature algorithm, or zero for one this client does not verify.
+func parse_algorithm(bytes: const u8[], element: der.Element) -> u8!:
+    let oid = try der.expect(bytes, element.content, element.end(), 0x06)
+    let has_parameters = oid.next != element.end()
+    var rsa_kind: u8 = 0
+    if der.oid_is(bytes, oid, oid_ecdsa_sha256) or der.oid_is(bytes, oid, oid_ecdsa_sha384) or der.oid_is(bytes, oid, oid_ecdsa_sha512):
+        if has_parameters:
+            error(invalid, "ECDSA AlgorithmIdentifier has parameters")
+        if der.oid_is(bytes, oid, oid_ecdsa_sha256): return signature.ecdsa_sha256
+        if der.oid_is(bytes, oid, oid_ecdsa_sha384): return signature.ecdsa_sha384
+        return signature.ecdsa_sha512
+    if der.oid_is(bytes, oid, oid_sha256_rsa): rsa_kind = signature.rsa_pkcs1_sha256
+    elif der.oid_is(bytes, oid, oid_sha384_rsa): rsa_kind = signature.rsa_pkcs1_sha384
+    elif der.oid_is(bytes, oid, oid_sha512_rsa): rsa_kind = signature.rsa_pkcs1_sha512
+    if rsa_kind != 0:
+        if has_parameters:
+            let null = try der.read(bytes, oid.next, element.end())
+            if null.tag != 0x05 or null.length != 0 or null.next != element.end():
+                error(invalid, "RSA AlgorithmIdentifier parameters are not NULL")
+        return rsa_kind
+    if der.oid_is(bytes, oid, oid_rsa_pss):
+        return try parse_pss(bytes, oid.next, element.end())
+    return 0
+
+## RSASSA-PSS-params (RFC 4055 §3.1) with explicit SHA-256/384/512, MGF1 over
+## the same hash and a salt as long as the hash; zero for anything else.
+func parse_pss(bytes: const u8[], at: usize, limit: usize) -> u8!:
+    let params = try der.expect(bytes, at, limit, 0x30)
+    var pos = params.content
+    if pos >= params.end() or bytes[pos] != 0xa0:
+        return 0
+    let hash_field = try der.expect(bytes, pos, params.end(), 0xa0)
+    let hash_algorithm = try der.expect(bytes, hash_field.content, hash_field.end(), 0x30)
+    let hash_oid = try der.expect(bytes, hash_algorithm.content, hash_algorithm.end(), 0x06)
+    var kind: u8 = 0
+    var size: usize = 0
+    if der.oid_is(bytes, hash_oid, oid_sha256):
+        kind = signature.rsa_pss_sha256
+        size = 32
+    elif der.oid_is(bytes, hash_oid, oid_sha384):
+        kind = signature.rsa_pss_sha384
+        size = 48
+    elif der.oid_is(bytes, hash_oid, oid_sha512):
+        kind = signature.rsa_pss_sha512
+        size = 64
+    else:
+        return 0
+    pos = hash_field.next
+    if pos >= params.end() or bytes[pos] != 0xa1:
+        return 0
+    let mgf_field = try der.expect(bytes, pos, params.end(), 0xa1)
+    let mgf = try der.expect(bytes, mgf_field.content, mgf_field.end(), 0x30)
+    let mgf_oid = try der.expect(bytes, mgf.content, mgf.end(), 0x06)
+    let mgf_hash = try der.expect(bytes, mgf_oid.next, mgf.end(), 0x30)
+    let mgf_hash_oid = try der.expect(bytes, mgf_hash.content, mgf_hash.end(), 0x06)
+    if not der.oid_is(bytes, mgf_oid, oid_mgf1) or not der.same(bytes[mgf_hash_oid.content..<mgf_hash_oid.end()], bytes[hash_oid.content..<hash_oid.end()]):
+        return 0
+    pos = mgf_field.next
+    if pos >= params.end() or bytes[pos] != 0xa2:
+        return 0
+    let salt_field = try der.expect(bytes, pos, params.end(), 0xa2)
+    let salt = try der.small_integer(bytes, try der.expect(bytes, salt_field.content, salt_field.end(), 0x02))
+    if salt != size:
+        return 0
+    if salt_field.next != params.end():
+        let trailer = try der.expect(bytes, salt_field.next, params.end(), 0xa3)
+        if trailer.next != params.end() or try der.small_integer(bytes, try der.expect(bytes, trailer.content, trailer.end(), 0x02)) != 1:
+            return 0
+    return kind
+
+func parse_spki(bytes: const u8[], spki: der.Element, cert: Certificate*) -> !:
+    let algorithm = try der.expect(bytes, spki.content, spki.end(), 0x30)
+    let oid = try der.expect(bytes, algorithm.content, algorithm.end(), 0x06)
+    let key = try der.expect(bytes, algorithm.next, spki.end(), 0x03)
+    if key.next != spki.end() or key.length < 2 or bytes[key.content] != 0:
+        error(invalid, "malformed subjectPublicKey")
+    if der.oid_is(bytes, oid, oid_rsa):
+        let rsa = try der.expect(bytes, key.content + 1, key.end(), 0x30)
+        let modulus = try der.expect(bytes, rsa.content, rsa.end(), 0x02)
+        let exponent = try der.expect(bytes, modulus.next, rsa.end(), 0x02)
+        if exponent.next != rsa.end() or rsa.next != key.end():
+            error(invalid, "malformed RSAPublicKey")
+        let n = try der.positive_integer(bytes, modulus)
+        let e = try der.positive_integer(bytes, exponent)
+        cert.key_kind = signature.key_rsa
+        cert.key_a_start = modulus.end() - n.length
+        cert.key_a_end = modulus.end()
+        cert.key_b_start = exponent.end() - e.length
+        cert.key_b_end = exponent.end()
+        discard(try cert.public_key(bytes))
+        return
+    if not der.oid_is(bytes, oid, oid_ec_public):
+        error(invalid, "unsupported certificate public key algorithm")
+    let curve = try der.expect(bytes, oid.next, algorithm.end(), 0x06)
+    if curve.next != algorithm.end():
+        error(invalid, "trailing EC algorithm parameters")
+    var width: usize = 0
+    if der.oid_is(bytes, curve, oid_p256):
+        cert.key_kind = signature.key_p256
+        width = 32
+    elif der.oid_is(bytes, curve, oid_p384):
+        cert.key_kind = signature.key_p384
+        width = 48
+    else:
+        error(invalid, "unsupported certificate EC curve")
+    if key.length != 2 + 2 * width or bytes[key.content + 1] != 4:
+        error(invalid, "invalid uncompressed EC public key")
+    cert.key_a_start = key.content + 2
+    cert.key_a_end = key.content + 2 + width
+    cert.key_b_start = key.content + 2 + width
+    cert.key_b_end = key.end()
+
+func parse_basic_constraints(bytes: const u8[], value: der.Element, cert: Certificate*) -> !:
+    cert.basic_present = true
+    let sequence = try der.expect(bytes, value.content, value.end(), 0x30)
+    if sequence.next != value.end():
+        error(invalid, "trailing basicConstraints bytes")
+    var pos = sequence.content
+    if pos < sequence.end() and bytes[pos] == 0x01:
+        let flag = try der.expect(bytes, pos, sequence.end(), 0x01)
+        if flag.length != 1 or bytes[flag.content] != 0xff:
+            error(invalid, "non-canonical basicConstraints cA")
+        cert.is_ca = true
+        pos = flag.next
+    if pos < sequence.end():
+        cert.path_len = try der.small_integer(bytes, try der.expect(bytes, pos, sequence.end(), 0x02))
+        cert.path_len_present = true
+        pos = (try der.read(bytes, pos, sequence.end())).next
+    if pos != sequence.end() or (cert.path_len_present and not cert.is_ca):
+        error(invalid, "invalid basicConstraints")
+
+func parse_key_usage(bytes: const u8[], value: der.Element, cert: Certificate*) -> !:
+    cert.key_usage_present = true
+    let bits = try der.expect(bytes, value.content, value.end(), 0x03)
+    if bits.next != value.end() or bits.length < 2 or bytes[bits.content] > 7:
+        error(invalid, "invalid keyUsage BIT STRING")
+    cert.digital_signature = (bytes[bits.content + 1] & 0x80) != 0
+    cert.key_cert_sign = (bytes[bits.content + 1] & 0x04) != 0
+
+func parse_eku(bytes: const u8[], value: der.Element, cert: Certificate*) -> !:
+    cert.eku_present = true
+    let sequence = try der.expect(bytes, value.content, value.end(), 0x30)
+    if sequence.next != value.end() or sequence.length == 0:
+        error(invalid, "invalid extendedKeyUsage")
+    var pos = sequence.content
+    while pos < sequence.end():
+        let purpose = try der.expect(bytes, pos, sequence.end(), 0x06)
+        if der.oid_is(bytes, purpose, oid_server_auth) or der.oid_is(bytes, purpose, oid_any_eku):
+            cert.server_auth = true
+        pos = purpose.next
+
+func parse_san(bytes: const u8[], value: der.Element, cert: Certificate*) -> !:
+    let sequence = try der.expect(bytes, value.content, value.end(), 0x30)
+    if sequence.next != value.end() or sequence.length == 0:
+        error(invalid, "invalid subjectAltName")
+    var pos = sequence.content
+    while pos < sequence.end():
+        let name = try der.read(bytes, pos, sequence.end())
+        if name.tag == 0x82:
+            if name.length == 0:
+                error(invalid, "empty subjectAltName dNSName")
+            for i in name.content..<name.end():
+                if bytes[i] < 0x21 or bytes[i] > 0x7e:
+                    error(invalid, "non-ASCII subjectAltName dNSName")
+        pos = name.next
+    cert.san_start = sequence.content
+    cert.san_end = sequence.end()
+
+func parse_extensions(bytes: const u8[], at: usize, limit: usize, cert: Certificate*) -> !:
+    let sequence = try der.expect(bytes, at, limit, 0x30)
+    if sequence.next != limit or sequence.length == 0:
+        error(invalid, "invalid certificate extensions")
+    var seen_start: usize[40]
+    var seen_end: usize[40]
+    var seen: usize = 0
+    var pos = sequence.content
+    while pos < sequence.end():
+        if seen >= 40:
+            error(invalid, "too many certificate extensions")
+        let extension = try der.expect(bytes, pos, sequence.end(), 0x30)
+        let oid = try der.expect(bytes, extension.content, extension.end(), 0x06)
+        for i in 0..<seen:
+            if der.same(bytes[oid.content..<oid.end()], bytes[seen_start[i]..<seen_end[i]]):
+                error(invalid, "duplicate certificate extension")
+        seen_start[seen] = oid.content
+        seen_end[seen] = oid.end()
+        seen += 1
+        var critical = false
+        var value_at = oid.next
+        if value_at < extension.end() and bytes[value_at] == 0x01:
+            let flag = try der.expect(bytes, value_at, extension.end(), 0x01)
+            if flag.length != 1 or bytes[flag.content] != 0xff:
+                error(invalid, "non-canonical extension critical flag")
+            critical = true
+            value_at = flag.next
+        let value = try der.expect(bytes, value_at, extension.end(), 0x04)
+        if value.next != extension.end():
+            error(invalid, "trailing extension fields")
+        let id = bytes[oid.content..<oid.end()]
+        if der.same(id, b"\x55\x1d\x0f"):
+            try parse_key_usage(bytes, value, cert)
+        elif der.same(id, b"\x55\x1d\x11"):
+            try parse_san(bytes, value, cert)
+        elif der.same(id, b"\x55\x1d\x13"):
+            try parse_basic_constraints(bytes, value, cert)
+        elif der.same(id, b"\x55\x1d\x25"):
+            try parse_eku(bytes, value, cert)
+        elif der.same(id, b"\x55\x1d\x1e"):
+            error(invalid, "nameConstraints are not supported")
+        elif critical and not is_policy_extension(id):
+            error(invalid, "unsupported critical certificate extension")
+        pos = extension.next
+
+## certificatePolicies, policyMappings, policyConstraints, inhibitAnyPolicy:
+## understood as policy-only, which this client does not enforce.
+func is_policy_extension(id: const u8[]) -> bool:
+    return id.length == 3 and id[0] == 0x55 and id[1] == 0x1d and (id[2] == 0x20 or id[2] == 0x21 or id[2] == 0x24 or id[2] == 0x36)
+
+## Parse a DER X.509 v3 certificate.
+pub func parse(bytes: const u8[]) -> Certificate!:
+    if bytes.length == 0 or bytes.length > max_certificate_bytes:
+        error(invalid, "certificate size is out of range")
+    var cert = Certificate()
+    let outer = try der.expect(bytes, 0, bytes.length, 0x30)
+    if outer.next != bytes.length:
+        error(invalid, "trailing certificate bytes")
+    let tbs = try der.expect(bytes, outer.content, outer.end(), 0x30)
+    cert.tbs_start = tbs.start
+    cert.tbs_end = tbs.next
+    let outer_algorithm = try der.expect(bytes, tbs.next, outer.end(), 0x30)
+    cert.algorithm = try parse_algorithm(bytes, outer_algorithm)
+    let value = try der.expect(bytes, outer_algorithm.next, outer.end(), 0x03)
+    if value.next != outer.end() or value.length < 2 or bytes[value.content] != 0:
+        error(invalid, "malformed certificate signature")
+    cert.signature_start = value.content + 1
+    cert.signature_end = value.end()
+    let version = try der.expect(bytes, tbs.content, tbs.end(), 0xa0)
+    let number = try der.expect(bytes, version.content, version.end(), 0x02)
+    if number.next != version.end() or number.length != 1 or bytes[number.content] != 2:
+        error(invalid, "certificate is not X.509 v3")
+    let serial = try der.expect(bytes, version.next, tbs.end(), 0x02)
+    if serial.length == 0 or serial.length > 21:
+        error(invalid, "invalid certificate serial number")
+    let inner_algorithm = try der.expect(bytes, serial.next, tbs.end(), 0x30)
+    if not der.same(bytes[inner_algorithm.start..<inner_algorithm.next], bytes[outer_algorithm.start..<outer_algorithm.next]):
+        error(invalid, "certificate signature algorithms disagree")
+    let issuer = try der.expect(bytes, inner_algorithm.next, tbs.end(), 0x30)
+    cert.issuer_start = issuer.start
+    cert.issuer_end = issuer.next
+    let validity = try der.expect(bytes, issuer.next, tbs.end(), 0x30)
+    let begin = try der.read(bytes, validity.content, validity.end())
+    let finish = try der.read(bytes, begin.next, validity.end())
+    cert.not_before = try der.time(bytes, begin)
+    cert.not_after = try der.time(bytes, finish)
+    if finish.next != validity.end() or cert.not_after < cert.not_before:
+        error(invalid, "invalid certificate validity")
+    let subject = try der.expect(bytes, validity.next, tbs.end(), 0x30)
+    cert.subject_start = subject.start
+    cert.subject_end = subject.next
+    let spki = try der.expect(bytes, subject.next, tbs.end(), 0x30)
+    try parse_spki(bytes, spki, &cert)
+    var pos = spki.next
+    while pos < tbs.end():
+        let field = try der.read(bytes, pos, tbs.end())
+        if field.tag == 0xa3:
+            if field.next != tbs.end():
+                error(invalid, "fields follow certificate extensions")
+            try parse_extensions(bytes, field.content, field.end(), &cert)
+        elif field.tag != 0x81 and field.tag != 0x82:
+            error(invalid, "unexpected tbsCertificate field")
+        pos = field.next
+    return cert

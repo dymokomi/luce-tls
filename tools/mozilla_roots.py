@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Generate src/luce_tls/roots.lucb from Mozilla's NSS certdata.txt.
+
+Usage: tools/mozilla_roots.py CERTDATA
+
+CERTDATA is lib/ckfw/builtins/certdata.txt from the NSS repository
+(https://hg.mozilla.org/projects/nss). Kept: roots whose trust object marks
+CKA_TRUST_SERVER_AUTH as CKT_NSS_TRUSTED_DELEGATOR, without a server
+distrust-after date, whose public key is RSA (2048–8192 bits), P-256 or P-384.
+Each root contributes its subject Name and public key, which is what path
+validation needs from a trust anchor.
+"""
+import datetime
+import hashlib
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT = ROOT / "src/luce_tls/roots.lucb"
+
+RSA = bytes.fromhex("2a864886f70d010101")
+EC = bytes.fromhex("2a8648ce3d0201")
+P256 = bytes.fromhex("2a8648ce3d030107")
+P384 = bytes.fromhex("2b81040022")
+KINDS = {"p256": 1, "p384": 2, "rsa": 3}
+
+
+def objects(text):
+    """certdata.txt objects as dicts of attribute -> (type, value)."""
+    current, lines = {}, iter(text.splitlines())
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            if not line.strip() and current:
+                yield current
+                current = {}
+            continue
+        if line.startswith("BEGINDATA"):
+            continue
+        parts = line.split(None, 2)
+        name, kind = parts[0], parts[1]
+        if kind == "MULTILINE_OCTAL":
+            data = bytearray()
+            for raw in lines:
+                if raw.strip() == "END":
+                    break
+                data += bytes(int(o, 8) for o in raw.strip().split("\\")[1:])
+            current[name] = (kind, bytes(data))
+        else:
+            current[name] = (kind, parts[2] if len(parts) > 2 else "")
+    if current:
+        yield current
+
+
+def tlv(data, at):
+    tag, first = data[at], data[at + 1]
+    at += 2
+    if first < 0x80:
+        size = first
+    else:
+        count = first & 0x7F
+        size = int.from_bytes(data[at:at + count], "big")
+        at += count
+    return tag, data[at:at + size], at + size
+
+
+def children(data):
+    at, out = 0, []
+    while at < len(data):
+        tag, body, end = tlv(data, at)
+        out.append((tag, body, data[at:end]))
+        at = end
+    return out
+
+
+def anchor(der):
+    """(subject DER, kind, first key part, second key part) or None."""
+    _, certificate, _ = tlv(der, 0)
+    tbs = children(children(certificate)[0][1])
+    if tbs[0][0] == 0xA0:
+        tbs = tbs[1:]
+    subject, spki = tbs[4][2], children(tbs[5][1])
+    algorithm = children(spki[0][1])
+    key = spki[1][1][1:]
+    if algorithm[0][1] == RSA:
+        modulus, exponent = (part[1].lstrip(b"\0") for part in children(children(key)[0][1]))
+        if not 256 <= len(modulus) <= 1024:
+            return None
+        return subject, "rsa", modulus, exponent
+    if algorithm[0][1] == EC and len(algorithm) > 1:
+        width = {P256: 32, P384: 48}.get(algorithm[1][1])
+        if width and len(key) == 1 + 2 * width and key[0] == 4:
+            return subject, "p256" if width == 32 else "p384", key[1:1 + width], key[1 + width:]
+    return None
+
+
+def literal(data):
+    """Rows of an array literal, 24 bytes per line."""
+    return [", ".join(f"0x{byte:02x}" for byte in data[at:at + 24]) for at in range(0, len(data), 24)]
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit(__doc__)
+    source = Path(sys.argv[1]).read_bytes()
+    trusted, distrusted, certificates = set(), set(), []
+    for item in objects(source.decode("utf-8")):
+        kind = item.get("CKA_CLASS", ("", ""))[1]
+        if kind == "CKO_NSS_TRUST":
+            key = (item["CKA_ISSUER"][1], item["CKA_SERIAL_NUMBER"][1])
+            if item.get("CKA_TRUST_SERVER_AUTH", ("", ""))[1] == "CKT_NSS_TRUSTED_DELEGATOR":
+                trusted.add(key)
+        elif kind == "CKO_CERTIFICATE":
+            label = item["CKA_LABEL"][1].strip('"')
+            distrust = item.get("CKA_NSS_SERVER_DISTRUST_AFTER", ("", ""))
+            if distrust[0] == "MULTILINE_OCTAL":
+                distrusted.add((item["CKA_ISSUER"][1], item["CKA_SERIAL_NUMBER"][1]))
+            certificates.append((label, (item["CKA_ISSUER"][1], item["CKA_SERIAL_NUMBER"][1]), item["CKA_VALUE"][1]))
+    data, rows, names, skipped = bytearray(), [], [], []
+    for label, key, der in certificates:
+        if key not in trusted or key in distrusted:
+            continue
+        found = anchor(der)
+        if not found:
+            skipped.append(label)
+            continue
+        subject, kind, first, second = found
+        row = []
+        for part in (subject, first, second):
+            row += [len(data), len(part)]
+            data += part
+        rows.append([row[0], row[1], KINDS[kind], row[2], row[3], row[4], row[5]])
+        names.append(f"{label} ({kind})")
+    digest = hashlib.sha256(source).hexdigest()
+    out = [
+        "## Generated by tools/mozilla_roots.py from Mozilla NSS certdata.txt; do not edit.",
+        f"## Source SHA-256 {digest}, generated {datetime.date.today().isoformat()}.",
+        f"## {len(rows)} roots trusted for TLS server authentication with RSA, P-256 or",
+        "## P-384 keys. Each row of `index` is: subject offset, subject length, key",
+        "## kind (1 P-256, 2 P-384, 3 RSA), then the offset and length of the first",
+        "## (x or modulus) and second (y or exponent) key parts within `data`.",
+        "## Skipped for unsupported keys: " + (", ".join(skipped) if skipped else "none") + ".",
+        "##",
+    ]
+    out += [f"## {i:3d} {name}" for i, name in enumerate(names)]
+    out.append("")
+    out.append(f"pub let count: usize = {len(rows)}")
+    out.append("")
+    out.append(f"pub let index: u32[{7 * len(rows)}] = [")
+    for i, row in enumerate(rows):
+        out.append("    " + ", ".join(str(v) for v in row) + ("," if i + 1 < len(rows) else ""))
+    out.append("]")
+    out.append("")
+    out.append(f"pub let data: u8[{len(data)}] = [")
+    chunks = literal(data)
+    for i, chunk in enumerate(chunks):
+        out.append("    " + chunk + ("," if i + 1 < len(chunks) else ""))
+    out.append("]")
+    OUTPUT.write_text("\n".join(out) + "\n")
+    print(f"wrote {OUTPUT.relative_to(ROOT)}: {len(rows)} roots, {len(data)} bytes; skipped {len(skipped)}")
+
+
+if __name__ == "__main__":
+    main()

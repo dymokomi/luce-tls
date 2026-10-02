@@ -1,0 +1,151 @@
+## Strict DER reading for X.509 (ITU-T X.690): bounded TLV decoding with
+## minimal definite lengths, OID comparison, positive INTEGERs, and RFC 5280
+## UTCTime/GeneralizedTime as Unix seconds. Every read is checked against its
+## container; malformed input fails with `invalid`, never reads out of range.
+import crypto_native as crypto
+
+pub let invalid = crypto.invalid
+
+## One decoded element: its tag, the content range and the end of the element.
+pub struct Element:
+    pub var tag: u8
+    pub var start: usize
+    pub var content: usize
+    pub var length: usize
+    pub var next: usize
+
+    ## The end of the content (equal to `next`).
+    pub func end() -> usize:
+        return self.content + self.length
+
+## Read one element at `pos` that must end within `limit`. Only low tag
+## numbers and minimal definite lengths of up to three bytes are accepted.
+pub func read(der: const u8[], pos: usize, limit: usize) -> Element!:
+    if limit > der.length or pos >= limit or limit - pos < 2:
+        error(invalid, "truncated DER element")
+    let tag = der[pos]
+    if (tag & 0x1f) == 0x1f:
+        error(invalid, "high-tag-number DER is unsupported")
+    let first = der[pos + 1]
+    var header: usize = 2
+    var length: usize = 0
+    if first < 0x80:
+        length = (usize)first
+    else:
+        let count = (usize)(first & 0x7f)
+        if count == 0 or count > 3 or limit - pos < 2 + count:
+            error(invalid, "invalid DER length")
+        if der[pos + 2] == 0:
+            error(invalid, "non-minimal DER length")
+        for i in 0..<count:
+            length = (length << 8) | (usize)der[pos + 2 + i]
+        if length < 128:
+            error(invalid, "non-minimal DER long length")
+        header += count
+    let content = pos + header
+    if content > limit or length > limit - content:
+        error(invalid, "DER length runs past its container")
+    return Element(tag = tag, start = pos, content = content, length = length, next = content + length)
+
+## Read an element that must carry tag `want`.
+pub func expect(der: const u8[], pos: usize, limit: usize, want: u8) -> Element!:
+    let element = try read(der, pos, limit)
+    if element.tag != want:
+        error(invalid, "unexpected DER tag")
+    return element
+
+## Whether the content of `element` equals `expected` (an OID body).
+pub func oid_is(der: const u8[], element: Element, expected: const u8[]) -> bool:
+    if element.length != expected.length:
+        return false
+    for i in 0..<element.length:
+        if der[element.content + i] != expected[i]:
+            return false
+    return true
+
+## Whether two byte ranges are equal.
+pub func same(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for i in 0..<a.length:
+        if a[i] != b[i]:
+            return false
+    return true
+
+## The magnitude bytes of a non-negative, minimally encoded INTEGER (without
+## the sign octet).
+pub func positive_integer(der: const u8[], element: Element) -> const u8[]!:
+    if element.tag != 0x02 or element.length == 0 or (der[element.content] & 0x80) != 0:
+        error(invalid, "DER INTEGER is not positive")
+    if element.length > 1 and der[element.content] == 0 and der[element.content + 1] < 0x80:
+        error(invalid, "DER INTEGER has a redundant sign byte")
+    if element.length > 1 and der[element.content] == 0:
+        return der[element.content + 1..<element.end()]
+    return der[element.content..<element.end()]
+
+## A small non-negative INTEGER that fits in usize.
+pub func small_integer(der: const u8[], element: Element) -> usize!:
+    let bytes = try positive_integer(der, element)
+    if bytes.length > 4:
+        error(invalid, "DER INTEGER is too large")
+    var value: usize = 0
+    for i in 0..<bytes.length:
+        value = (value << 8) | (usize)bytes[i]
+    return value
+
+func digit(der: const u8[], at: usize) -> i64!:
+    if der[at] < '0' or der[at] > '9':
+        error(invalid, "certificate time contains a non-digit")
+    return (i64)(der[at] - '0')
+
+func decimal2(der: const u8[], at: usize) -> i64!:
+    return (try digit(der, at)) * 10 + try digit(der, at + 1)
+
+func leap_year(year: i64) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+func month_days(year: i64, month: i64) -> i64:
+    if month == 2:
+        return 29 if leap_year(year) else 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+## RFC 5280 §4.1.2.5: Zulu UTCTime (YYMMDDHHMMSSZ) or GeneralizedTime
+## (YYYYMMDDHHMMSSZ) as Unix seconds. Dates before 1970 are rejected.
+pub func time(der: const u8[], element: Element) -> i64!:
+    var at = element.content
+    var year: i64
+    if element.tag == 0x17:
+        if element.length != 13 or der[element.content + 12] != 'Z':
+            error(invalid, "invalid UTCTime")
+        let short = try decimal2(der, at)
+        year = 1900 + short if short >= 50 else 2000 + short
+        at += 2
+    elif element.tag == 0x18:
+        if element.length != 15 or der[element.content + 14] != 'Z':
+            error(invalid, "invalid GeneralizedTime")
+        year = (try decimal2(der, at)) * 100 + try decimal2(der, at + 2)
+        at += 4
+    else:
+        error(invalid, "unsupported certificate time encoding")
+    let month = try decimal2(der, at)
+    let day = try decimal2(der, at + 2)
+    let hour = try decimal2(der, at + 4)
+    let minute = try decimal2(der, at + 6)
+    let second = try decimal2(der, at + 8)
+    if year < 1970 or year > 9999 or month < 1 or month > 12:
+        error(invalid, "certificate time is outside the supported calendar")
+    if day < 1 or day > month_days(year, month) or hour > 23 or minute > 59 or second > 59:
+        error(invalid, "certificate time is not a valid UTC instant")
+    var days: i64 = 0
+    var y: i64 = 1970
+    while y < year:
+        days += 366 if leap_year(y) else 365
+        y += 1
+    var m: i64 = 1
+    while m < month:
+        days += month_days(year, m)
+        m += 1
+    days += day - 1
+    return ((days * 24 + hour) * 60 + minute) * 60 + second
