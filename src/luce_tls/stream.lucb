@@ -74,6 +74,11 @@ pub struct Stream: io.Reader, io.Writer:
         try client.connect(&self.channel, &link, &link, host, &policy, alpn)
         self.secure = true
 
+    ## The negotiated TLS cipher suite (0x1301 AES-128-GCM, 0x1302 AES-256-GCM,
+    ## 0x1303 ChaCha20-Poly1305), or zero when plain.
+    pub func cipher_suite() -> u16:
+        return self.channel.cipher_suite()
+
     ## Whether a TLS session protects the stream.
     pub func is_secure() -> bool:
         return self.secure

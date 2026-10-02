@@ -28,7 +28,7 @@ pub let group_x25519: u16 = 0x001d
 pub let ecdsa_secp256r1_sha256: u16 = 0x0403
 
 ## Whether secp256r1 (EC)DHE is available for key shares.
-pub let p256_key_exchange = false
+pub let p256_key_exchange = true
 
 let message_capacity: usize = 65536
 
@@ -244,13 +244,24 @@ pub struct KeyShare:
     var public: u8[65]
     var size: usize
 
-    ## A fresh key pair for `group` (x25519 or secp256r1).
+    ## A fresh key pair for `group` (x25519, or secp256r1 as an uncompressed
+    ## point; its scalar multiplication is variable-time, see luce-crypto).
     pub static func generate(group: u16) -> KeyShare!:
         var share = KeyShare(group = group)
         if group == group_x25519:
             try os.random_bytes(share.secret)
             try crypto.x25519_base(share.public[..<32], share.secret)
             share.size = 32
+            return share
+        if group == group_secp256r1:
+            var x: u8[32]
+            var y: u8[32]
+            try crypto.ecdsa_p256_keygen(share.secret, x, y)
+            share.public[0] = 4
+            for i in 0..<32:
+                share.public[1 + i] = x[i]
+                share.public[33 + i] = y[i]
+            share.size = 65
             return share
         error(invalid, "unsupported TLS key-exchange group")
 
@@ -269,6 +280,11 @@ pub struct KeyShare:
                 any |= out[i]
             if any == 0:
                 error(invalid, "x25519 key share produced the all-zero secret")
+            return 32
+        if self.group == group_secp256r1:
+            if peer.length != 65 or peer[0] != 4:
+                error(invalid, "invalid secp256r1 key share")
+            try crypto.ecdh_p256(self.secret, peer[1..<33], peer[33..<65], out[..<32])
             return 32
         error(invalid, "unsupported TLS key-exchange group")
 

@@ -48,7 +48,7 @@ pub func suite_for(id: u16) -> Suite!:
 
 ## Whether this build can protect records with `id`.
 pub func suite_supported(id: u16) -> bool:
-    return id == chacha20_poly1305_sha256
+    return id == aes_128_gcm_sha256 or id == aes_256_gcm_sha384 or id == chacha20_poly1305_sha256
 
 ## A diagnostic for a received fatal alert (RFC 8446 §6.2).
 func alert_message(description: u8) -> str:
@@ -72,13 +72,13 @@ func seal(id: u16, key: const u8[], nonce: const u8[], aad: const u8[], plain: c
     if id == chacha20_poly1305_sha256:
         try crypto.aead_seal(key, nonce, aad, plain, cipher, tag)
     else:
-        error(invalid, "AES-GCM record protection is not available yet")
+        try crypto.aes_gcm_seal(key, nonce, aad, plain, cipher, tag)
 
 func open(id: u16, key: const u8[], nonce: const u8[], aad: const u8[], cipher: const u8[], tag: const u8[], plain: u8[]) -> !:
     if id == chacha20_poly1305_sha256:
         try crypto.aead_open(key, nonce, aad, cipher, tag, plain)
     else:
-        error(invalid, "AES-GCM record protection is not available yet")
+        try crypto.aes_gcm_open(key, nonce, aad, cipher, tag, plain)
 
 ## One direction's record protection: AEAD key, static IV and sequence number.
 ## The zero value is unprotected, for the plaintext records that open a handshake.
@@ -145,6 +145,10 @@ pub struct Channel:
     pub mutating func consume(count: usize):
         assert(count <= self.end - self.start)
         self.start += count
+
+    ## The negotiated cipher suite (RFC 8446 §B.4), or zero before the handshake.
+    pub func cipher_suite() -> u16:
+        return self.suite
 
     ## Whether application keys are installed and no error has occurred.
     pub func established() -> bool:

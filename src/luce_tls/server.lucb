@@ -27,22 +27,24 @@ struct ClientHello:
     var offers_x25519: bool
     var offers_p256: bool
     var cookie_size: usize
+    var only_suite: u16
 
 ## Answer a client on an accepted transport with certificate `der` and P-256
 ## private key `d`. `retry_group`, when not zero, is demanded by a
 ## HelloRetryRequest unless the first ClientHello already shares it.
-## `request_certificate` sends a CertificateRequest.
+## `request_certificate` sends a CertificateRequest. `suite`, when not zero,
+## is the only cipher suite the server accepts.
 pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, der: const u8[], d: const u8[],
-    retry_group: u16 = 0, request_certificate: bool = false) -> !:
+    retry_group: u16 = 0, request_certificate: bool = false, suite: u16 = 0) -> !:
     if der.length == 0 or der.length > 16000:
         error(invalid, "server certificate size is out of range")
     var messages = try hs.Messages.create()
     defer messages.close()
     var first = try messages.next(channel, source)
-    var hello = ClientHello()
+    var hello = ClientHello(only_suite = suite)
     try parse_client_hello(first, &hello)
-    let suite = try record.suite_for(hello.suite)
-    var schedule = try hs.Schedule.start(suite)
+    let parameters = try record.suite_for(hello.suite)
+    var schedule = try hs.Schedule.start(parameters)
     defer schedule.wipe()
     var group = hs.group_x25519
     if retry_group != 0:
@@ -57,7 +59,7 @@ pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, de
         try channel.send(sink, record.handshake, retry[..<retry_size])
         first = try messages.next(channel, source)
         let suite_before = hello.suite
-        hello = ClientHello()
+        hello = ClientHello(only_suite = suite)
         try parse_client_hello(first, &hello)
         if hello.share_group != group or hello.suite != suite_before:
             error(invalid, "the second ClientHello ignores the HelloRetryRequest")
@@ -74,11 +76,11 @@ pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, de
     let ccs = b"\x01"
     try channel.send(sink, record.change_cipher_spec, ccs)
     try schedule.enter_handshake(shared[..<shared_size])
-    try channel.protect_write(suite, schedule.handshake_secret(false))
-    try channel.protect_read(suite, schedule.handshake_secret(true))
+    try channel.protect_write(parameters, schedule.handshake_secret(false))
+    try channel.protect_read(parameters, schedule.handshake_secret(true))
     var flight = try new u8[der.length + 512] in memory.heap
     defer free(flight) in memory.heap
-    let flight_size = try build_flight(flight, &schedule, der, d, suite, request_certificate)
+    let flight_size = try build_flight(flight, &schedule, der, d, parameters, request_certificate)
     try channel.send(sink, record.handshake, flight[..<flight_size])
     var client_secret: u8[48]
     var server_secret: u8[48]
@@ -92,11 +94,11 @@ pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, de
         try schedule.add(message)
         message = try messages.next(channel, source)
     var expected: u8[48]
-    try schedule.finished_value(schedule.handshake_secret(true), expected[..<suite.hash_size])
-    try hs.check_finished(message, expected[..<suite.hash_size])
+    try schedule.finished_value(schedule.handshake_secret(true), expected[..<parameters.hash_size])
+    try hs.check_finished(message, expected[..<parameters.hash_size])
     if not messages.empty():
         error(invalid, "unexpected handshake data after client Finished")
-    try channel.start_application(suite, client_secret[..<suite.hash_size], server_secret[..<suite.hash_size])
+    try channel.start_application(parameters, client_secret[..<parameters.hash_size], server_secret[..<parameters.hash_size])
 
 func u16_at(data: const u8[], at: usize) -> u16:
     return ((u16)data[at] << 8) | (u16)data[at + 1]
@@ -117,7 +119,8 @@ func parse_client_hello(message: const u8[], out: ClientHello*) -> !:
     if suites_size == 0 or suites_size % 2 != 0 or message.length - at < suites_size + 1:
         error(invalid, "invalid ClientHello cipher suites")
     for p in 0..<preferred_suites.length:
-        if out.suite == 0 and record.suite_supported(preferred_suites[p]):
+        let allowed = out.only_suite == 0 or out.only_suite == preferred_suites[p]
+        if out.suite == 0 and allowed and record.suite_supported(preferred_suites[p]):
             for i in 0..<suites_size // 2:
                 if u16_at(message, at + 2 * i) == preferred_suites[p]:
                     out.suite = preferred_suites[p]

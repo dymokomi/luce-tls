@@ -1,0 +1,78 @@
+## Loopback handshakes over every cipher suite, with and without a
+## HelloRetryRequest that moves the key exchange from x25519 to secp256r1.
+import net
+import c
+import thread
+import crypto_native
+import tls_stream
+import luce_tls.record as record
+import luce_tls.server as server
+import luce_tls.handshake as hs
+import luce_tls.x509 as x509
+
+var g_d: u8[32]
+var g_qx: u8[32]
+var g_qy: u8[32]
+var g_cert: u8[2048]
+var g_cert_n: usize
+var g_port: @u64
+var g_ready: @u64
+var g_served: @u64
+
+## The scripted cases: cipher suite and the group a HelloRetryRequest demands.
+let case_suites: u16[6] = [0x1303, 0x1301, 0x1302, 0x1301, 0x1302, 0x1303]
+let case_groups: u16[6] = [0, 0, 0, 0x0017, 0x0017, 0x0017]
+
+func serve_one(listener: net.Listener*, index: usize) -> !:
+    var conn = try listener.accept()
+    defer discard(conn.close() catch: recover ())
+    var channel = record.Channel()
+    try server.accept(&channel, &conn, &conn, g_cert[..<g_cert_n], g_d, case_groups[index], false, case_suites[index])
+    var buffer: u8[16]
+    let n = try channel.read_application(&conn, buffer)
+    try channel.write_application(&conn, buffer[..<n])
+
+func server_main(raw: void*?):
+    discard(raw)
+    let bind_addr = net.resolve((c.str)"localhost", 0) catch failure:
+        return
+    var listener = net.Listener.bind(bind_addr) catch failure:
+        return
+    let addr = listener.address() catch failure:
+        return
+    g_port.store((u64)addr.port, .release)
+    g_ready.store(1, .release)
+    for i in 0..<case_suites.length:
+        serve_one(&listener, i) catch failure:
+            print(f"server case {i}: {failure.message}")
+            return
+        g_served.store((u64)(i + 1), .release)
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
+    g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
+    var worker = try thread.spawn(server_main, none, name = "tls-handshake-server")
+    defer worker.join() catch failure:
+        discard(failure)
+    var i: usize = 0
+    while g_ready.load(.acquire) == 0 and i < 500:
+        thread.sleep(10)
+        i += 1
+    let port = (u16)g_port.load(.acquire)
+    let pinned = try tls_stream.Trust.pinned_issuer(g_qx, g_qy)
+    for index in 0..<case_suites.length:
+        var stream = try tls_stream.Stream.connect("localhost", port, true, policy = pinned)
+        assert(stream.cipher_suite() == case_suites[index], "unexpected cipher suite")
+        discard(try stream.write(b"ping"))
+        var reply: u8[4]
+        var got: usize = 0
+        while got < 4:
+            let n = try stream.read(reply[got..])
+            assert(n > 0)
+            got += n
+        assert(reply[0] == 'p' and reply[1] == 'i' and reply[3] == 'g')
+        try stream.close()
+    assert(hs.p256_key_exchange)
+    print("PASS TLS 1.3 handshakes: AES-128-GCM, AES-256-GCM, ChaCha20, HelloRetryRequest to secp256r1")
+    return 0

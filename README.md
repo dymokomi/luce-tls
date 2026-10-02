@@ -63,10 +63,11 @@ with a caller-owned `net.Connection` and `Secrets`) remains for blocking use.
 ## Protocol coverage
 
 - TLS 1.3 only (RFC 8446). SNI is sent for DNS names. HelloRetryRequest
-  handling (cookie and group change) is implemented; it becomes reachable once
-  a second key-exchange group is offered. Post-handshake NewSessionTicket is
+  (cookie and group change) is handled. Post-handshake NewSessionTicket is
   ignored and KeyUpdate is honoured. Records are fragmented at 2^14 bytes.
-- Cipher suite: TLS_CHACHA20_POLY1305_SHA256. Key exchange: X25519.
+- Cipher suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384 and
+  TLS_CHACHA20_POLY1305_SHA256. Key exchange: X25519, and secp256r1 after a
+  HelloRetryRequest.
 - Server signatures: ECDSA P-256/SHA-256.
 - Certificate validation: a pinned P-256 issuer, or the strict public profile
   (P-256 leaf, ECDSA P-384 issuers, explicit P-384 anchor; until the bundled
