@@ -1,0 +1,81 @@
+## What a client trusts, and how it authenticates a server's TLS Certificate
+## message under that trust to obtain the leaf public key.
+import crypto_native as crypto
+import luce_tls.x509 as x509
+import luce_tls.chain as chain
+import luce_tls.signature as signature
+
+pub let invalid = crypto.invalid
+
+let kind_public: u8 = 0
+let kind_issuer: u8 = 1
+let kind_p384_root: u8 = 2
+
+## A trust policy. The zero value is the public-roots policy.
+pub struct Trust:
+    var kind: u8
+    var x: u8[48]
+    var y: u8[48]
+
+    ## Public servers: the bundled root set validates the presented chain.
+    pub static func public_roots() -> Trust:
+        return Trust(kind = kind_public)
+
+    ## A private server whose P-256 leaf is signed directly by this issuer key
+    ## (or is self-signed with it), as minted by `x509.mint_self_signed`.
+    pub static func pinned_issuer(x: const u8[], y: const u8[]) -> Trust!:
+        if x.length != 32 or y.length != 32:
+            error(invalid, "pinned P-256 issuer coordinates must be 32 bytes")
+        var trust = Trust(kind = kind_issuer)
+        for i in 0..<32:
+            trust.x[i] = x[i]
+            trust.y[i] = y[i]
+        return trust
+
+    ## A strict public chain that ends at this explicit P-384 root key.
+    pub static func p384_root(x: const u8[], y: const u8[]) -> Trust!:
+        if x.length != 48 or y.length != 48:
+            error(invalid, "P-384 root coordinates must be 48 bytes")
+        var trust = Trust(kind = kind_p384_root)
+        for i in 0..<48:
+            trust.x[i] = x[i]
+            trust.y[i] = y[i]
+        return trust
+
+## Authenticate a complete Certificate handshake message for `host` at Unix
+## time `now` and return the leaf key that must sign CertificateVerify.
+pub func authenticate(trust: const Trust*, message: const u8[], host: str, now: i64) -> signature.PublicKey!:
+    var x: u8[32]
+    var y: u8[32]
+    if trust.kind == kind_issuer:
+        var der: u8[8192]
+        let count = try first_certificate(message, der)
+        var leaf = x509.Certificate()
+        try x509.parse(der[..<count], &leaf)
+        if not (try x509.verify_signed_by(der[..<count], &leaf, trust.x[..<32], trust.y[..<32])):
+            error(invalid, "leaf certificate is not signed by the pinned issuer")
+        if not (try x509.matches_host(der[..<count], &leaf, host)):
+            error(invalid, "certificate does not match the host name")
+        return try signature.PublicKey.p256(leaf.key_x, leaf.key_y)
+    if trust.kind == kind_p384_root:
+        try chain.verify_server_chain(message, host, now, trust.x, trust.y, x, y)
+    else:
+        try chain.verify_server_chain(message, host, now, chain.isrg_root_x2_x, chain.isrg_root_x2_y, x, y)
+    return try signature.PublicKey.p256(x, y)
+
+## Copy the first certificate of a Certificate message.
+func first_certificate(message: const u8[], out: u8[]) -> usize!:
+    if message.length < 12 or message[0] != 11:
+        error(invalid, "invalid Certificate handshake message")
+    let length = ((usize)message[1] << 16) | ((usize)message[2] << 8) | (usize)message[3]
+    if length != message.length - 4 or message[4] != 0:
+        error(invalid, "malformed Certificate handshake message")
+    let list = ((usize)message[5] << 16) | ((usize)message[6] << 8) | (usize)message[7]
+    if list == 0 or list != message.length - 8:
+        error(invalid, "invalid certificate list length")
+    let size = ((usize)message[8] << 16) | ((usize)message[9] << 8) | (usize)message[10]
+    if size == 0 or size > out.length or size > message.length - 11:
+        error(invalid, "certificate is empty or too large")
+    for i in 0..<size:
+        out[i] = message[11 + i]
+    return size

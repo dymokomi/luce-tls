@@ -1,0 +1,360 @@
+## The TLS 1.3 client handshake (RFC 8446 §4) over any byte source and sink:
+## ClientHello with SNI, an optional HelloRetryRequest round, the encrypted
+## server flight, certificate authentication under a Trust policy, and the
+## client Finished. On success the channel holds application traffic keys.
+## Out of scope: PSK resumption, 0-RTT and client certificates (a server that
+## sends CertificateRequest fails the handshake).
+import io
+import os
+import time
+import crypto_native as crypto
+import luce_tls.record as record
+import luce_tls.handshake as hs
+import luce_tls.signature as signature
+import luce_tls.trust as trust
+
+pub let invalid = crypto.invalid
+
+let retry_random = b"\xcf\x21\xad\x74\xe5\x9a\x61\x11\xbe\x1d\x8c\x02\x1e\x65\xb8\x91\xc2\xa2\x11\x16\x7a\xbb\x8c\x5e\x07\x9e\x09\xe2\xc8\xa8\x33\x9c"
+
+## The cipher suites this client offers, in preference order; only those the
+## record layer supports are sent.
+let offered_suites: u16[3] = [0x1301, 0x1302, 0x1303]
+
+## The parts of a ServerHello or HelloRetryRequest the client acts on.
+struct ServerHello:
+    var retry: bool
+    var suite: u16
+    var group: u16
+    var share: u8[97]
+    var share_size: usize
+    var cookie: u8[1024]
+    var cookie_size: usize
+
+## The ClientHello inputs that stay fixed across a HelloRetryRequest.
+struct Hello:
+    var random: u8[32]
+    var session: u8[32]
+    var host: str
+    var alpn: str
+
+## Run the client handshake for `host` on an already connected transport.
+## `source` and `sink` usually view the same connection. `now` is the Unix time
+## for certificate validity; zero uses the wall clock. `alpn`, when not empty,
+## is the one application protocol offered and must be what the server picks.
+pub func connect(channel: record.Channel*, source: io.Reader, sink: io.Writer, host: str,
+    policy: const trust.Trust*, alpn: str = "", now: i64 = 0) -> !:
+    try check_host(host)
+    if alpn.length > 255:
+        error(invalid, "ALPN protocol name is too long")
+    var hello = Hello(host = host, alpn = alpn)
+    try os.random_bytes(hello.random)
+    try os.random_bytes(hello.session)
+    var share = try hs.KeyShare.generate(hs.group_x25519)
+    defer share.wipe()
+    var messages = try hs.Messages.create()
+    defer messages.close()
+    var first: u8[2048]
+    let first_size = try build_hello(first, &hello, &share, b"")
+    try channel.send(sink, record.handshake, first[..<first_size])
+    var reply = try messages.next(channel, source)
+    var server = ServerHello()
+    try parse_server_hello(reply, &hello, &server)
+    let suite = try record.suite_for(server.suite)
+    var schedule = try hs.Schedule.start(suite)
+    defer schedule.wipe()
+    if server.retry:
+        if server.group == share.group or not offers_group(server.group):
+            error(invalid, "HelloRetryRequest selected an unusable group")
+        try schedule.add_retry_hash(first[..<first_size])
+        try schedule.add(reply)
+        share.wipe()
+        share = try hs.KeyShare.generate(server.group)
+        var second: u8[2048]
+        let second_size = try build_hello(second, &hello, &share, server.cookie[..<server.cookie_size])
+        try schedule.add(second[..<second_size])
+        try channel.send(sink, record.handshake, second[..<second_size])
+        let retried_suite = server.suite
+        reply = try messages.next(channel, source)
+        server = ServerHello()
+        try parse_server_hello(reply, &hello, &server)
+        if server.retry or server.suite != retried_suite:
+            error(invalid, "ServerHello disagrees with the HelloRetryRequest")
+    else:
+        try schedule.add(first[..<first_size])
+    try schedule.add(reply)
+    if server.group != share.group:
+        error(invalid, "ServerHello key share is for a group the client did not send")
+    if not messages.empty():
+        error(invalid, "handshake data straddles the TLS key change")
+    var shared: u8[48]
+    defer crypto.wipe(shared)
+    let shared_size = try share.agree(server.share[..<server.share_size], shared)
+    try schedule.enter_handshake(shared[..<shared_size])
+    try channel.protect_read(suite, schedule.handshake_secret(false))
+    try server_flight(channel, source, &messages, &schedule, &hello, policy, now)
+    var client_secret: u8[48]
+    var server_secret: u8[48]
+    defer crypto.wipe(client_secret)
+    defer crypto.wipe(server_secret)
+    try schedule.enter_application(client_secret, server_secret)
+    try client_flight(channel, sink, &schedule, suite)
+    try channel.start_application(suite, server_secret[..<suite.hash_size], client_secret[..<suite.hash_size])
+
+## Whether `group` is one the client listed in supported_groups.
+func offers_group(group: u16) -> bool:
+    return group == hs.group_x25519 or (group == hs.group_secp256r1 and hs.p256_key_exchange)
+
+func offers_suite(suite: u16) -> bool:
+    for i in 0..<offered_suites.length:
+        if offered_suites[i] == suite and record.suite_supported(suite):
+            return true
+    return false
+
+## Server names are 1–253 ASCII bytes; SNI is omitted for IP literals.
+func check_host(host: str) -> !:
+    if host.length == 0 or host.length > 253:
+        error(invalid, "TLS host name must be 1 to 253 bytes")
+    for i in 0..<host.length:
+        let c = host.bytes[i]
+        if c <= 0x20 or c >= 0x7f:
+            error(invalid, "TLS host name must be printable ASCII")
+
+func is_ip_literal(host: str) -> bool:
+    var dots: usize = 0
+    for i in 0..<host.length:
+        let c = host.bytes[i]
+        if c == ':':
+            return true
+        if c == '.':
+            dots += 1
+        elif c < '0' or c > '9':
+            return false
+    return dots == 3
+
+## Encode a ClientHello handshake message into `out`; returns its length.
+func build_hello(out: u8[], hello: const Hello*, share: const hs.KeyShare*, cookie: const u8[]) -> usize!:
+    var b = hs.Builder.over(out)
+    b.put8(hs.client_hello)
+    let body = b.open(3)
+    b.put16(0x0303)
+    b.put(hello.random)
+    b.put8(32)
+    b.put(hello.session)
+    let suites = b.open(2)
+    for i in 0..<offered_suites.length:
+        if record.suite_supported(offered_suites[i]):
+            b.put16((usize)offered_suites[i])
+    b.close(suites, 2)
+    b.put8(1)
+    b.put8(0)
+    let extensions = b.open(2)
+    if not is_ip_literal(hello.host):
+        b.put16(0x0000)
+        let sni = b.open(2)
+        let list = b.open(2)
+        b.put8(0)
+        b.put16(hello.host.length)
+        b.put(hello.host.bytes)
+        b.close(list, 2)
+        b.close(sni, 2)
+    b.put16(0x002b)
+    b.put16(3)
+    b.put8(2)
+    b.put16(0x0304)
+    b.put16(0x000a)
+    let groups = b.open(2)
+    let group_list = b.open(2)
+    b.put16((usize)hs.group_x25519)
+    if hs.p256_key_exchange:
+        b.put16((usize)hs.group_secp256r1)
+    b.close(group_list, 2)
+    b.close(groups, 2)
+    b.put16(0x000d)
+    let algorithms = b.open(2)
+    let scheme_list = b.open(2)
+    b.put(signature.offered_schemes)
+    b.close(scheme_list, 2)
+    b.close(algorithms, 2)
+    b.put16(0x0033)
+    let shares = b.open(2)
+    let share_list = b.open(2)
+    b.put16((usize)share.group)
+    b.put16(share.public_key().length)
+    b.put(share.public_key())
+    b.close(share_list, 2)
+    b.close(shares, 2)
+    if hello.alpn.length > 0:
+        b.put16(0x0010)
+        let alpn = b.open(2)
+        let names = b.open(2)
+        b.put8((u8)hello.alpn.length)
+        b.put(hello.alpn.bytes)
+        b.close(names, 2)
+        b.close(alpn, 2)
+    if cookie.length > 0:
+        b.put16(0x002c)
+        let cookie_extension = b.open(2)
+        b.put16(cookie.length)
+        b.put(cookie)
+        b.close(cookie_extension, 2)
+    b.close(extensions, 2)
+    b.close(body, 3)
+    return b.size()
+
+func u16_at(data: const u8[], at: usize) -> u16:
+    return ((u16)data[at] << 8) | (u16)data[at + 1]
+
+## Parse a ServerHello or HelloRetryRequest (RFC 8446 §4.1.3, §4.1.4).
+func parse_server_hello(message: const u8[], hello: const Hello*, out: ServerHello*) -> !:
+    if message.length < 4 or message[0] != hs.server_hello or hs.message_length(message) != message.length - 4:
+        error(invalid, "expected a ServerHello")
+    if message.length < 4 + 2 + 32 + 1:
+        error(invalid, "truncated ServerHello")
+    if message[4] != 3 or message[5] != 3:
+        error(invalid, "unexpected ServerHello legacy version")
+    out.retry = crypto.equal(message[6..<38], retry_random)
+    var at: usize = 38
+    let session_size = (usize)message[at]
+    at += 1
+    if session_size != 32 or message.length - at < 32 + 5:
+        error(invalid, "ServerHello session id mismatch")
+    if not crypto.equal(message[at..<at + 32], hello.session):
+        error(invalid, "ServerHello session id mismatch")
+    at += 32
+    out.suite = u16_at(message, at)
+    if not offers_suite(out.suite):
+        error(invalid, "the server selected a cipher suite the client did not offer")
+    if message[at + 2] != 0:
+        error(invalid, "ServerHello selected non-null compression")
+    at += 3
+    let extensions_size = (usize)u16_at(message, at)
+    at += 2
+    if extensions_size != message.length - at:
+        error(invalid, "ServerHello extension length mismatch")
+    var have_version = false
+    var have_share = false
+    while at < message.length:
+        if message.length - at < 4:
+            error(invalid, "truncated ServerHello extension")
+        let kind = u16_at(message, at)
+        let size = (usize)u16_at(message, at + 2)
+        at += 4
+        if size > message.length - at:
+            error(invalid, "ServerHello extension runs past its container")
+        let value = message[at..<at + size]
+        if kind == 0x002b:
+            if have_version or size != 2 or value[0] != 3 or value[1] != 4:
+                error(invalid, "the server did not select TLS 1.3")
+            have_version = true
+        elif kind == 0x0033:
+            if have_share:
+                error(invalid, "duplicate ServerHello key_share")
+            try parse_share(value, out)
+            have_share = true
+        elif kind == 0x002c and out.retry:
+            if out.cookie_size != 0 or size < 3 or (usize)u16_at(value, 0) != size - 2 or size - 2 > out.cookie.length:
+                error(invalid, "invalid HelloRetryRequest cookie")
+            for i in 0..<size - 2:
+                out.cookie[i] = value[2 + i]
+            out.cookie_size = size - 2
+        else:
+            error(invalid, "ServerHello carries an extension the client did not offer")
+        at += size
+    if not have_version or (not have_share and not out.retry):
+        error(invalid, "ServerHello lacks required TLS 1.3 extensions")
+    if out.retry and not have_share and out.cookie_size == 0:
+        error(invalid, "HelloRetryRequest would not change the ClientHello")
+
+func parse_share(value: const u8[], out: ServerHello*) -> !:
+    if value.length < 2:
+        error(invalid, "truncated key_share")
+    out.group = u16_at(value, 0)
+    if not offers_group(out.group):
+        error(invalid, "the server selected a group the client did not offer")
+    if out.retry:
+        if value.length != 2:
+            error(invalid, "invalid HelloRetryRequest key_share")
+        return
+    if value.length < 4 or (usize)u16_at(value, 2) != value.length - 4 or value.length - 4 > out.share.length:
+        error(invalid, "invalid ServerHello key_share")
+    for i in 0..<value.length - 4:
+        out.share[i] = value[4 + i]
+    out.share_size = value.length - 4
+
+## Process EncryptedExtensions through server Finished.
+func server_flight(channel: record.Channel*, source: io.Reader, messages: hs.Messages*, schedule: hs.Schedule*,
+    hello: const Hello*, policy: const trust.Trust*, now: i64) -> !:
+    var message = try messages.next(channel, source)
+    if message[0] != hs.encrypted_extensions:
+        error(invalid, "expected EncryptedExtensions")
+    try check_encrypted_extensions(message, hello)
+    try schedule.add(message)
+    message = try messages.next(channel, source)
+    if message[0] == hs.certificate_request:
+        error(invalid, "the server requires a client certificate")
+    if message[0] != hs.certificate:
+        error(invalid, "expected the server Certificate")
+    let at = now if now != 0 else time.unix()
+    let key = try trust.authenticate(policy, message, hello.host, at)
+    try schedule.add(message)
+    message = try messages.next(channel, source)
+    if message[0] != hs.certificate_verify or message.length < 8 or hs.message_length(message) != message.length - 4:
+        error(invalid, "expected a well-formed CertificateVerify")
+    let scheme = u16_at(message, 4)
+    let size = (usize)u16_at(message, 6)
+    if size != message.length - 8:
+        error(invalid, "CertificateVerify signature length mismatch")
+    var transcript_hash: u8[48]
+    let hash_size = try schedule.current(transcript_hash)
+    var content: u8[160]
+    let content_size = hs.verify_content(true, transcript_hash[..<hash_size], content)
+    try signature.verify_scheme(&key, scheme, content[..<content_size], message[8..])
+    try schedule.add(message)
+    message = try messages.next(channel, source)
+    var expected: u8[48]
+    try schedule.finished_value(schedule.handshake_secret(false), expected[..<hash_size])
+    try hs.check_finished(message, expected[..<hash_size])
+    try schedule.add(message)
+    if not messages.empty():
+        error(invalid, "unexpected handshake data after server Finished")
+
+## EncryptedExtensions must be well formed; a selected ALPN protocol must be
+## exactly the one offered.
+func check_encrypted_extensions(message: const u8[], hello: const Hello*) -> !:
+    if message.length < 6 or hs.message_length(message) != message.length - 4 or (usize)u16_at(message, 4) != message.length - 6:
+        error(invalid, "malformed EncryptedExtensions")
+    var at: usize = 6
+    while at < message.length:
+        if message.length - at < 4:
+            error(invalid, "truncated EncryptedExtensions entry")
+        let kind = u16_at(message, at)
+        let size = (usize)u16_at(message, at + 2)
+        at += 4
+        if size > message.length - at:
+            error(invalid, "EncryptedExtensions entry runs past its container")
+        if kind == 0x0010:
+            let value = message[at..<at + size]
+            let name = hello.alpn.bytes
+            if name.length == 0 or size != 3 + name.length or (usize)u16_at(value, 0) != size - 2 or (usize)value[2] != name.length:
+                error(invalid, "the server selected an ALPN protocol the client did not offer")
+            if not crypto.equal(value[3..], name):
+                error(invalid, "the server selected an ALPN protocol the client did not offer")
+        elif kind == 0x002b or kind == 0x0033 or kind == 0x0029:
+            error(invalid, "EncryptedExtensions carries a ServerHello-only extension")
+        at += size
+
+## Send change_cipher_spec (middlebox compatibility) and the client Finished.
+func client_flight(channel: record.Channel*, sink: io.Writer, schedule: hs.Schedule*, suite: record.Suite) -> !:
+    let ccs = b"\x01"
+    try channel.send(sink, record.change_cipher_spec, ccs)
+    try channel.protect_write(suite, schedule.handshake_secret(true))
+    var verify: u8[48]
+    try schedule.finished_value(schedule.handshake_secret(true), verify[..<suite.hash_size])
+    var message: u8[52]
+    message[0] = hs.finished
+    message[3] = (u8)suite.hash_size
+    for i in 0..<suite.hash_size:
+        message[4 + i] = verify[i]
+    try schedule.add(message[..<4 + suite.hash_size])
+    try channel.send(sink, record.handshake, message[..<4 + suite.hash_size])

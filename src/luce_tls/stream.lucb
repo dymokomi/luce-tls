@@ -1,0 +1,136 @@
+## TlsStream: an owned TLS 1.3 client connection that implements io.Reader and
+## io.Writer, so protocol code can hold a plain `net.Connection` or a TlsStream
+## behind the same interface. It owns the TCP connection and its record channel,
+## applies one optional deadline and cancellation signal to every transfer, and
+## supports STARTTLS by upgrading a connection already used for plaintext.
+import io
+import net
+import c
+import sync
+import platform
+import luce_tls.record as record
+import luce_tls.client as client
+import luce_tls.trust as trust
+
+pub let invalid = record.invalid
+
+## Re-exported trust policy; see `trust.Trust`.
+pub type Trust = trust.Trust
+
+## One TLS client connection. Zero is closed. Copying does not duplicate
+## ownership; close exactly one copy and synchronize calls on it.
+## The connection is kept nonblocking; reads and writes wait through the
+## stream's deadline (none by default), so a timed-out read resumes intact.
+pub struct TlsStream: io.Reader, io.Writer:
+    var connection: net.Connection
+    var channel: record.Channel
+    var deadline: net.Deadline
+    var cancellation: sync.Cancellation*?
+
+    ## Resolve `host`, connect, and handshake. `policy` decides which
+    ## certificates are accepted (default: the public roots). `alpn`, when not
+    ## empty, is offered as the only application protocol. `deadline` and
+    ## `cancellation` bound the connect and the handshake and stay set for
+    ## later transfers; change them with `set_deadline`.
+    pub static func connect(host: str, port: u16, policy: Trust = Trust(), alpn: str = "",
+        deadline: net.Deadline = net.Deadline(), cancellation: sync.Cancellation*? = none) -> TlsStream!:
+        var host_c: u8[256]
+        if host.length == 0 or host.length + 1 > host_c.length:
+            error(invalid, "host name must be 1 to 255 bytes")
+        for i in 0..<host.length:
+            host_c[i] = host.bytes[i]
+        host_c[host.length] = 0
+        let address = try net.resolve((c.str)(str)host_c[..<host.length], port)
+        let connection = try net.Connection.connect(address, deadline, cancellation)
+        return try TlsStream.upgrade(connection, host, policy, alpn, deadline, cancellation)
+
+    ## Connect to a public server, validating its chain against the bundled roots.
+    pub static func connect_trusted(host: str, port: u16, deadline: net.Deadline = net.Deadline(),
+        cancellation: sync.Cancellation*? = none) -> TlsStream!:
+        return try TlsStream.connect(host, port, Trust.public_roots(), "", deadline, cancellation)
+
+    ## STARTTLS: take ownership of a connected socket the caller has used for
+    ## plaintext (IMAP STARTTLS, SMTP submission) and run the client handshake
+    ## on it. Discard any plaintext buffered after the server's STARTTLS reply
+    ## before calling (RFC 3207 §4.2, RFC 2595 §3.1). On failure the connection
+    ## is closed.
+    pub static func upgrade(connection: net.Connection, host: str, policy: Trust = Trust(), alpn: str = "",
+        deadline: net.Deadline = net.Deadline(), cancellation: sync.Cancellation*? = none) -> TlsStream!:
+        var stream = TlsStream(connection = connection, deadline = deadline, cancellation = cancellation)
+        errdefer stream.destroy()
+        try stream.connection.set_nonblocking(true)
+        var link = try net.DeadlineStream.over(&stream.connection, deadline, cancellation)
+        try client.connect(&stream.channel, &link, &link, host, &policy, alpn)
+        return stream
+
+    ## Apply `deadline` and `cancellation` to subsequent reads, writes and
+    ## close. `net.Deadline()` removes the time limit.
+    pub mutating func set_deadline(deadline: net.Deadline, cancellation: sync.Cancellation*? = none):
+        self.deadline = deadline
+        self.cancellation = cancellation
+
+    ## Decrypted bytes already buffered: `read` returns them without touching
+    ## the socket, and a socket readiness poll cannot see them.
+    pub func pending() -> usize:
+        return self.channel.pending()
+
+    ## Whether the server has sent close_notify; `read` then returns zero.
+    pub func closed_by_peer() -> bool:
+        return self.channel.closed_by_peer()
+
+    ## Read up to `buffer.length` bytes of application data, receiving one
+    ## record when nothing is pending. Zero on a nonempty buffer means the
+    ## server closed the TLS session. A timeout or cancellation fails with the
+    ## `net` error and leaves the stream usable.
+    pub mutating func read(buffer: u8[]) -> usize!:
+        if buffer.length == 0:
+            return 0
+        var link = try net.DeadlineStream.over(&self.connection, self.deadline, self.cancellation)
+        return try self.channel.read_application(&link, buffer)
+
+    ## Encrypt and send all of `data` (as records of at most 16 KiB) and return
+    ## its length. A failure part way leaves the TLS session unusable.
+    pub mutating func write(data: const u8[]) -> usize!:
+        if data.length == 0:
+            return 0
+        var link = try net.DeadlineStream.over(&self.connection, self.deadline, self.cancellation)
+        try self.channel.write_application(&link, data)
+        return data.length
+
+    ## Wait for readiness. Read interest is satisfied at once by pending
+    ## plaintext; otherwise this waits on the socket. Readiness is advisory: a
+    ## readable socket may hold only part of a record, or a record carrying no
+    ## application data, so pair `read` with a deadline when a stall matters.
+    pub func wait(interest: net.WaitInterest = net.WaitInterest.read, deadline: net.Deadline = net.Deadline(),
+        cancellation: sync.Cancellation*? = none) -> net.Readiness!:
+        if interest != net.WaitInterest.write and self.pending() > 0:
+            return net.Readiness(readable = true, writable = interest == net.WaitInterest.both)
+        return try self.connection.wait(interest, deadline, cancellation)
+
+    ## Borrow the socket descriptor, for a `net.Poller`. Check `pending()`
+    ## before polling, and never read or write the descriptor directly.
+    pub func descriptor() -> platform.SocketDescriptor?:
+        return self.connection.descriptor()
+
+    ## The connected peer's address.
+    pub func peer_address() -> net.SocketAddress!:
+        return try self.connection.peer_address()
+
+    ## Send close_notify (best effort, under the current deadline), close the
+    ## socket and erase the session keys. Safe to repeat.
+    pub mutating func close() -> !:
+        if self.connection.descriptor() == none:
+            return
+        if self.channel.established():
+            discard(self.send_close_notify() catch: recover ())
+        self.channel.wipe()
+        try self.connection.close()
+
+    mutating func send_close_notify() -> !:
+        var link = try net.DeadlineStream.over(&self.connection, self.deadline, self.cancellation)
+        try self.channel.send_alert(&link, 1, 0)
+
+    ## Close without close_notify, ignoring errors; for unwinding.
+    pub mutating func destroy():
+        self.channel.wipe()
+        self.connection.destroy()

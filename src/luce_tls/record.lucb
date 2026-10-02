@@ -1,0 +1,387 @@
+## The TLS 1.3 record layer (RFC 8446 §5 and §7.3): cipher-suite parameters,
+## per-direction traffic keys, and the Channel that carries both directions of
+## one connection. Incoming records are reassembled incrementally, so a read
+## interrupted by a deadline resumes exactly where it stopped, and are decrypted
+## in place: decrypted application data stays in the record buffer until the
+## caller consumes it, which is what `pending` reports. The channel reads only
+## the bytes of one record at a time, so socket readiness and `pending` together
+## describe everything that is available.
+import io
+import crypto_native as crypto
+import luce_tls.tls as tls
+
+pub let invalid = crypto.invalid
+
+## RFC 8446 §5.1 content types.
+pub let change_cipher_spec: u8 = 20
+pub let alert: u8 = 21
+pub let handshake: u8 = 22
+pub let application_data: u8 = 23
+
+## RFC 8446 §B.4 cipher suites.
+pub let aes_128_gcm_sha256: u16 = 0x1301
+pub let aes_256_gcm_sha384: u16 = 0x1302
+pub let chacha20_poly1305_sha256: u16 = 0x1303
+
+## The largest plaintext fragment of one record.
+pub let max_fragment: usize = 16384
+let header_size: usize = 5
+let max_body: usize = 16384 + 256
+let tag_size: usize = 16
+
+## A cipher suite's hash and key sizes.
+pub struct Suite:
+    pub var id: u16
+    pub var hash: str
+    pub var hash_size: usize
+    pub var key_size: usize
+
+## The parameters of a supported cipher suite.
+pub func suite_for(id: u16) -> Suite!:
+    if id == aes_128_gcm_sha256:
+        return Suite(id = id, hash = "sha256", hash_size = 32, key_size = 16)
+    if id == aes_256_gcm_sha384:
+        return Suite(id = id, hash = "sha384", hash_size = 48, key_size = 32)
+    if id == chacha20_poly1305_sha256:
+        return Suite(id = id, hash = "sha256", hash_size = 32, key_size = 32)
+    error(invalid, "unsupported TLS cipher suite")
+
+## Whether this build can protect records with `id`.
+pub func suite_supported(id: u16) -> bool:
+    return id == chacha20_poly1305_sha256
+
+## A diagnostic for a received fatal alert (RFC 8446 §6.2).
+func alert_message(description: u8) -> str:
+    if description == 10: return "the peer sent the TLS alert unexpected_message"
+    if description == 20: return "the peer sent the TLS alert bad_record_mac"
+    if description == 40: return "the peer sent the TLS alert handshake_failure"
+    if description == 42: return "the peer sent the TLS alert bad_certificate"
+    if description == 47: return "the peer sent the TLS alert illegal_parameter"
+    if description == 48: return "the peer sent the TLS alert unknown_ca"
+    if description == 50: return "the peer sent the TLS alert decode_error"
+    if description == 51: return "the peer sent the TLS alert decrypt_error"
+    if description == 70: return "the peer sent the TLS alert protocol_version"
+    if description == 80: return "the peer sent the TLS alert internal_error"
+    if description == 109: return "the peer sent the TLS alert missing_extension"
+    if description == 112: return "the peer sent the TLS alert unrecognized_name"
+    if description == 116: return "the peer sent the TLS alert certificate_required"
+    if description == 120: return "the peer sent the TLS alert no_application_protocol"
+    return "the peer sent a fatal TLS alert"
+
+func seal(id: u16, key: const u8[], nonce: const u8[], aad: const u8[], plain: const u8[], cipher: u8[], tag: u8[]) -> !:
+    if id == chacha20_poly1305_sha256:
+        try crypto.aead_seal(key, nonce, aad, plain, cipher, tag)
+    else:
+        error(invalid, "AES-GCM record protection is not available yet")
+
+func open(id: u16, key: const u8[], nonce: const u8[], aad: const u8[], cipher: const u8[], tag: const u8[], plain: u8[]) -> !:
+    if id == chacha20_poly1305_sha256:
+        try crypto.aead_open(key, nonce, aad, cipher, tag, plain)
+    else:
+        error(invalid, "AES-GCM record protection is not available yet")
+
+## One direction's record protection: AEAD key, static IV and sequence number.
+## The zero value is unprotected, for the plaintext records that open a handshake.
+pub struct Cipher:
+    var suite: u16
+    var key: u8[32]
+    var key_size: usize
+    var iv: u8[12]
+    var sequence: u64
+
+    ## Derive the key and IV of `suite` from a traffic secret (RFC 8446 §7.3).
+    pub static func from_secret(suite: Suite, secret: const u8[]) -> Cipher!:
+        var cipher = Cipher(suite = suite.id, key_size = suite.key_size)
+        try tls.expand_label(secret, b"key", b"", cipher.key[..<suite.key_size], suite.hash)
+        try tls.expand_label(secret, b"iv", b"", cipher.iv, suite.hash)
+        return cipher
+
+    ## Whether records in this direction are encrypted.
+    pub func protected() -> bool:
+        return self.suite != 0
+
+    ## The per-record nonce: the IV with the sequence number XORed into its tail.
+    func nonce(out: u8[]):
+        for i in 0..<12:
+            out[i] = self.iv[i]
+        for i in 0..<8:
+            out[4 + i] ^= (u8)(self.sequence >> (u64)(56 - 8 * i))
+
+    ## Erase the key material of this exact object.
+    pub mutating func wipe():
+        crypto.wipe(u8[]((u8*)&self, sizeof(Cipher)))
+
+## Both directions of one TLS connection without its transport. The reader
+## reassembles one record at a time in `record`; decrypted plaintext stays there
+## in [start, end) until consumed. Copying a channel copies its keys and state;
+## use one copy at a time and `wipe` it when done.
+pub struct Channel:
+    var read: Cipher
+    var write: Cipher
+    var suite: u16
+    var read_secret: u8[48]
+    var write_secret: u8[48]
+    var record: u8[16645]
+    var received: usize
+    var kind: u8
+    var start: usize
+    var end: usize
+    var peer_closed: bool
+    var key_update_due: bool
+    var failed: bool
+
+    ## Decrypted application data received but not yet read. A readiness wait on
+    ## the socket cannot see these bytes, so check this first.
+    pub func pending() -> usize:
+        if self.kind != application_data:
+            return 0
+        return self.end - self.start
+
+    ## The unread plaintext of the last record returned by `next`.
+    pub func plaintext() -> const u8[]:
+        return self.record[self.start..<self.end]
+
+    ## Mark the current record's plaintext as consumed.
+    pub mutating func consume(count: usize):
+        assert(count <= self.end - self.start)
+        self.start += count
+
+    ## Whether application keys are installed and no error has occurred.
+    pub func established() -> bool:
+        return self.write.protected() and self.read.protected() and not self.failed
+
+    ## Whether the peer sent close_notify.
+    pub func closed_by_peer() -> bool:
+        return self.peer_closed
+
+    ## Protect incoming records with keys from a handshake traffic secret.
+    pub mutating func protect_read(suite: Suite, secret: const u8[]) -> !:
+        self.read = try Cipher.from_secret(suite, secret)
+
+    ## Protect outgoing records with keys from a handshake traffic secret.
+    pub mutating func protect_write(suite: Suite, secret: const u8[]) -> !:
+        self.write = try Cipher.from_secret(suite, secret)
+
+    ## Install application traffic secrets and their keys.
+    pub mutating func start_application(suite: Suite, read_secret: const u8[], write_secret: const u8[]) -> !:
+        self.suite = suite.id
+        for i in 0..<suite.hash_size:
+            self.read_secret[i] = read_secret[i]
+            self.write_secret[i] = write_secret[i]
+        self.read = try Cipher.from_secret(suite, read_secret)
+        self.write = try Cipher.from_secret(suite, write_secret)
+
+    ## Read the rest of one record from `source`. Bytes already received are
+    ## kept, so after a timeout the next call continues the same record. Only
+    ## transport errors leave the channel usable; protocol errors fail it.
+    mutating func fill(source: io.Reader) -> !:
+        while true:
+            var want = header_size
+            if self.received >= header_size:
+                want = header_size + (((usize)self.record[3] << 8) | (usize)self.record[4])
+                if self.received == want:
+                    return
+            let count = try source.read(self.record[self.received..<want])
+            if count == 0:
+                self.failed = true
+                if self.received == 0:
+                    error(io.unexpected_eof, "the peer closed the connection without close_notify")
+                error(io.unexpected_eof, "the peer closed the connection inside a TLS record")
+            self.received += count
+            if self.received == header_size:
+                let header = tls.parse_record(self.record[..<header_size]) catch failure:
+                    self.failed = true
+                    error(failure.code, failure.message)
+                let limit = max_body if self.read.protected() else max_fragment
+                if header.length == 0 or (usize)header.length > limit:
+                    self.failed = true
+                    error(invalid, "TLS record length is out of range")
+
+    ## Receive and unprotect the next record, returning its content type. Its
+    ## plaintext is `plaintext()`. A change_cipher_spec record is returned as is
+    ## for the handshake to judge. Unread plaintext must be consumed first.
+    pub mutating func next(source: io.Reader) -> u8!:
+        if self.failed:
+            error(invalid, "the TLS channel failed earlier")
+        if self.start != self.end:
+            error(invalid, "unread TLS plaintext would be overwritten")
+        try self.fill(source)
+        errdefer self.failed = true
+        let length = self.received - header_size
+        self.received = 0
+        self.kind = self.record[0]
+        self.start = header_size
+        self.end = header_size + length
+        if self.kind == change_cipher_spec:
+            if length != 1 or self.record[header_size] != 1:
+                error(invalid, "malformed change_cipher_spec record")
+            return self.kind
+        if not self.read.protected():
+            return self.kind
+        if self.kind != application_data or length < tag_size + 1:
+            error(invalid, "unexpected record type under TLS record protection")
+        var nonce: u8[12]
+        self.read.nonce(nonce)
+        let sealed = length - tag_size
+        let body = self.record[header_size..<header_size + sealed]
+        try open(self.read.suite, self.read.key[..<self.read.key_size], nonce, self.record[..<header_size], body,
+            self.record[header_size + sealed..<header_size + length], body)
+        self.read.sequence += 1
+        var at = sealed
+        while at > 0 and body[at - 1] == 0:
+            at -= 1
+        if at == 0:
+            error(invalid, "protected TLS record has no content type")
+        if at - 1 > max_fragment:
+            error(invalid, "TLS record plaintext exceeds 2^14 bytes")
+        self.kind = body[at - 1]
+        self.end = header_size + at - 1
+        if self.kind == change_cipher_spec:
+            error(invalid, "change_cipher_spec inside TLS record protection")
+        if self.kind != handshake and self.kind != application_data and self.kind != alert:
+            error(invalid, "unknown TLS inner content type")
+        if self.kind != application_data and self.end == self.start:
+            error(invalid, "empty TLS handshake or alert record")
+        return self.kind
+
+    ## Send `data` as records of content type `kind`, fragmenting at 2^14 bytes.
+    ## A failed write leaves the peer with a partial record, so the channel is
+    ## unusable afterwards.
+    pub mutating func send(sink: io.Writer, kind: u8, data: const u8[]) -> !:
+        if self.failed:
+            error(invalid, "the TLS channel failed earlier")
+        errdefer self.failed = true
+        var done: usize = 0
+        while true:
+            let size = max_fragment if data.length - done > max_fragment else data.length - done
+            try self.send_fragment(sink, kind, data[done..<done + size])
+            done += size
+            if done == data.length:
+                return
+
+    mutating func send_fragment(sink: io.Writer, kind: u8, fragment: const u8[]) -> !:
+        var record: u8[16406]
+        record[1] = 3
+        record[2] = 3
+        if not self.write.protected():
+            record[0] = kind
+            record[3] = (u8)(fragment.length >> 8)
+            record[4] = (u8)fragment.length
+            for i in 0..<fragment.length:
+                record[header_size + i] = fragment[i]
+            try io.write_all(sink, record[..<header_size + fragment.length])
+            return
+        let inner = fragment.length + 1
+        let length = inner + tag_size
+        record[0] = application_data
+        record[3] = (u8)(length >> 8)
+        record[4] = (u8)length
+        for i in 0..<fragment.length:
+            record[header_size + i] = fragment[i]
+        record[header_size + fragment.length] = kind
+        var nonce: u8[12]
+        self.write.nonce(nonce)
+        let body = record[header_size..<header_size + inner]
+        try seal(self.write.suite, self.write.key[..<self.write.key_size], nonce, record[..<header_size], body, body,
+            record[header_size + inner..<header_size + length])
+        self.write.sequence += 1
+        try io.write_all(sink, record[..<header_size + length])
+
+    ## Send a fatal or warning alert (RFC 8446 §6).
+    pub mutating func send_alert(sink: io.Writer, level: u8, description: u8) -> !:
+        var body: u8[2]
+        body[0] = level
+        body[1] = description
+        try self.send(sink, alert, body)
+
+    ## Read application data into `buffer`, receiving records as needed. Zero
+    ## means the peer sent close_notify. Post-handshake NewSessionTicket messages
+    ## are ignored and KeyUpdate is honoured (RFC 8446 §4.6.3).
+    pub mutating func read_application(source: io.Reader, buffer: u8[]) -> usize!:
+        if buffer.length == 0:
+            return 0
+        while self.pending() == 0:
+            if self.peer_closed:
+                return 0
+            self.start = self.end
+            let kind = try self.next(source)
+            if kind == alert:
+                try self.receive_alert()
+                return 0
+            elif kind == handshake:
+                try self.post_handshake()
+            elif kind != application_data:
+                self.failed = true
+                error(invalid, "unexpected TLS record after the handshake")
+        let count = buffer.length if buffer.length < self.pending() else self.pending()
+        for i in 0..<count:
+            buffer[i] = self.record[self.start + i]
+        self.start += count
+        return count
+
+    ## Encrypt and send application data, first answering a peer KeyUpdate.
+    pub mutating func write_application(sink: io.Writer, data: const u8[]) -> !:
+        if self.key_update_due:
+            let message = b"\x18\x00\x00\x01\x00"
+            try self.send(sink, handshake, message)
+            try self.update_write_key()
+            self.key_update_due = false
+        try self.send(sink, application_data, data)
+
+    ## Handle a received alert record: close_notify ends the stream; any other
+    ## alert fails the channel with a diagnostic naming it.
+    pub mutating func receive_alert() -> !:
+        let body = self.plaintext()
+        if body.length != 2:
+            self.failed = true
+            error(invalid, "malformed TLS alert")
+        self.start = self.end
+        if body[1] == 0:
+            self.peer_closed = true
+            return
+        self.failed = true
+        error(invalid, alert_message(body[1]))
+
+    ## Process whole post-handshake messages within one record.
+    mutating func post_handshake() -> !:
+        let body = self.plaintext()
+        var at: usize = 0
+        while at < body.length:
+            if body.length - at < 4:
+                error(invalid, "fragmented post-handshake message is unsupported")
+            let length = ((usize)body[at + 1] << 16) | ((usize)body[at + 2] << 8) | (usize)body[at + 3]
+            if length > body.length - at - 4:
+                error(invalid, "fragmented post-handshake message is unsupported")
+            let kind = body[at]
+            if kind == 24:
+                if length != 1 or body[at + 4] > 1:
+                    error(invalid, "malformed KeyUpdate")
+                if body[at + 4] == 1:
+                    self.key_update_due = true
+                try self.update_read_key()
+            elif kind != 4:
+                error(invalid, "unexpected post-handshake message")
+            at += 4 + length
+        self.start = self.end
+
+    mutating func update_read_key() -> !:
+        let parameters = try suite_for(self.suite)
+        var next: u8[48]
+        defer crypto.wipe(next)
+        try tls.expand_label(self.read_secret[..<parameters.hash_size], b"traffic upd", b"", next[..<parameters.hash_size], parameters.hash)
+        for i in 0..<parameters.hash_size:
+            self.read_secret[i] = next[i]
+        self.read = try Cipher.from_secret(parameters, next[..<parameters.hash_size])
+
+    mutating func update_write_key() -> !:
+        let parameters = try suite_for(self.suite)
+        var next: u8[48]
+        defer crypto.wipe(next)
+        try tls.expand_label(self.write_secret[..<parameters.hash_size], b"traffic upd", b"", next[..<parameters.hash_size], parameters.hash)
+        for i in 0..<parameters.hash_size:
+            self.write_secret[i] = next[i]
+        self.write = try Cipher.from_secret(parameters, next[..<parameters.hash_size])
+
+    ## Erase keys, secrets and buffered plaintext of this exact object.
+    pub mutating func wipe():
+        crypto.wipe(u8[]((u8*)&self, sizeof(Channel)))

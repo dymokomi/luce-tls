@@ -1,0 +1,265 @@
+## A small TLS 1.3 server handshake for private endpoints and loopback tests:
+## one ECDSA-P256 certificate, x25519 key exchange, and the first mutually
+## supported cipher suite. A test may force a HelloRetryRequest by asking for a
+## group the client did not send a share for. No resumption or client certs.
+import io
+import memory
+import os
+import crypto_native as crypto
+import luce_tls.record as record
+import luce_tls.handshake as hs
+import luce_tls.signature as signature
+
+pub let invalid = crypto.invalid
+
+## Server suite preference; only suites the record layer supports are chosen.
+let preferred_suites: u16[3] = [0x1303, 0x1301, 0x1302]
+
+## The ClientHello fields the server uses.
+struct ClientHello:
+    var session: u8[32]
+    var session_size: usize
+    var suite: u16
+    var share: u8[97]
+    var share_size: usize
+    var share_group: u16
+    var offers_x25519: bool
+    var offers_p256: bool
+    var cookie_size: usize
+
+## Answer a client on an accepted transport with certificate `der` and P-256
+## private key `d`. `retry_group`, when not zero, is demanded by a
+## HelloRetryRequest unless the first ClientHello already shares it.
+pub func accept(channel: record.Channel*, source: io.Reader, sink: io.Writer, der: const u8[], d: const u8[],
+    retry_group: u16 = 0) -> !:
+    if der.length == 0 or der.length > 16000:
+        error(invalid, "server certificate size is out of range")
+    var messages = try hs.Messages.create()
+    defer messages.close()
+    var first = try messages.next(channel, source)
+    var hello = ClientHello()
+    try parse_client_hello(first, &hello)
+    let suite = try record.suite_for(hello.suite)
+    var schedule = try hs.Schedule.start(suite)
+    defer schedule.wipe()
+    var group = hs.group_x25519
+    if retry_group != 0:
+        group = retry_group
+    elif not hello.offers_x25519:
+        error(invalid, "the client does not support x25519")
+    if hello.share_group != group:
+        try schedule.add_retry_hash(first)
+        var retry: u8[128]
+        let retry_size = try build_server_hello(retry, &hello, true, group, b"")
+        try schedule.add(retry[..<retry_size])
+        try channel.send(sink, record.handshake, retry[..<retry_size])
+        first = try messages.next(channel, source)
+        let suite_before = hello.suite
+        hello = ClientHello()
+        try parse_client_hello(first, &hello)
+        if hello.share_group != group or hello.suite != suite_before:
+            error(invalid, "the second ClientHello ignores the HelloRetryRequest")
+    try schedule.add(first)
+    var share = try hs.KeyShare.generate(group)
+    defer share.wipe()
+    var shared: u8[48]
+    defer crypto.wipe(shared)
+    let shared_size = try share.agree(hello.share[..<hello.share_size], shared)
+    var reply: u8[256]
+    let reply_size = try build_server_hello(reply, &hello, false, group, share.public_key())
+    try schedule.add(reply[..<reply_size])
+    try channel.send(sink, record.handshake, reply[..<reply_size])
+    let ccs = b"\x01"
+    try channel.send(sink, record.change_cipher_spec, ccs)
+    try schedule.enter_handshake(shared[..<shared_size])
+    try channel.protect_write(suite, schedule.handshake_secret(false))
+    try channel.protect_read(suite, schedule.handshake_secret(true))
+    var flight = try new u8[der.length + 512] in memory.heap
+    defer free(flight) in memory.heap
+    let flight_size = try build_flight(flight, &schedule, der, d, suite)
+    try channel.send(sink, record.handshake, flight[..<flight_size])
+    var client_secret: u8[48]
+    var server_secret: u8[48]
+    defer crypto.wipe(client_secret)
+    defer crypto.wipe(server_secret)
+    try schedule.enter_application(client_secret, server_secret)
+    let message = try messages.next(channel, source)
+    var expected: u8[48]
+    try schedule.finished_value(schedule.handshake_secret(true), expected[..<suite.hash_size])
+    try hs.check_finished(message, expected[..<suite.hash_size])
+    if not messages.empty():
+        error(invalid, "unexpected handshake data after client Finished")
+    try channel.start_application(suite, client_secret[..<suite.hash_size], server_secret[..<suite.hash_size])
+
+func u16_at(data: const u8[], at: usize) -> u16:
+    return ((u16)data[at] << 8) | (u16)data[at + 1]
+
+func parse_client_hello(message: const u8[], out: ClientHello*) -> !:
+    if message.length < 4 + 2 + 32 + 1 or message[0] != hs.client_hello or hs.message_length(message) != message.length - 4:
+        error(invalid, "expected a ClientHello")
+    var at: usize = 38
+    out.session_size = (usize)message[at]
+    at += 1
+    if out.session_size > 32 or message.length - at < out.session_size + 2:
+        error(invalid, "invalid ClientHello session id")
+    for i in 0..<out.session_size:
+        out.session[i] = message[at + i]
+    at += out.session_size
+    let suites_size = (usize)u16_at(message, at)
+    at += 2
+    if suites_size == 0 or suites_size % 2 != 0 or message.length - at < suites_size + 1:
+        error(invalid, "invalid ClientHello cipher suites")
+    for p in 0..<preferred_suites.length:
+        if out.suite == 0 and record.suite_supported(preferred_suites[p]):
+            for i in 0..<suites_size // 2:
+                if u16_at(message, at + 2 * i) == preferred_suites[p]:
+                    out.suite = preferred_suites[p]
+    if out.suite == 0:
+        error(invalid, "no shared TLS 1.3 cipher suite")
+    at += suites_size
+    let compression_size = (usize)message[at]
+    at += 1 + compression_size
+    if message.length - at < 2 or (usize)u16_at(message, at) != message.length - at - 2:
+        error(invalid, "invalid ClientHello extensions")
+    at += 2
+    var tls13 = false
+    while at < message.length:
+        if message.length - at < 4:
+            error(invalid, "truncated ClientHello extension")
+        let kind = u16_at(message, at)
+        let size = (usize)u16_at(message, at + 2)
+        at += 4
+        if size > message.length - at:
+            error(invalid, "ClientHello extension runs past its container")
+        let value = message[at..<at + size]
+        if kind == 0x002b:
+            var i: usize = 1
+            while i + 1 < size:
+                if value[i] == 3 and value[i + 1] == 4:
+                    tls13 = true
+                i += 2
+        elif kind == 0x000a:
+            var i: usize = 2
+            while i + 1 < size:
+                if u16_at(value, i) == hs.group_x25519:
+                    out.offers_x25519 = true
+                if u16_at(value, i) == hs.group_secp256r1:
+                    out.offers_p256 = true
+                i += 2
+        elif kind == 0x0033:
+            try parse_shares(value, out)
+        elif kind == 0x002c:
+            out.cookie_size = size
+        at += size
+    if not tls13:
+        error(invalid, "the client does not offer TLS 1.3")
+
+func parse_shares(value: const u8[], out: ClientHello*) -> !:
+    if value.length < 2 or (usize)u16_at(value, 0) != value.length - 2:
+        error(invalid, "invalid ClientHello key_share")
+    var at: usize = 2
+    while at < value.length:
+        if value.length - at < 4:
+            error(invalid, "truncated ClientHello key share")
+        let group = u16_at(value, at)
+        let size = (usize)u16_at(value, at + 2)
+        at += 4
+        if size > value.length - at:
+            error(invalid, "ClientHello key share runs past its container")
+        if out.share_size == 0 and size <= out.share.length:
+            out.share_group = group
+            for i in 0..<size:
+                out.share[i] = value[at + i]
+            out.share_size = size
+        at += size
+
+func build_server_hello(out: u8[], hello: const ClientHello*, retry: bool, group: u16, share: const u8[]) -> usize!:
+    var b = hs.Builder.over(out)
+    b.put8(hs.server_hello)
+    let body = b.open(3)
+    b.put16(0x0303)
+    if retry:
+        b.put(b"\xcf\x21\xad\x74\xe5\x9a\x61\x11\xbe\x1d\x8c\x02\x1e\x65\xb8\x91\xc2\xa2\x11\x16\x7a\xbb\x8c\x5e\x07\x9e\x09\xe2\xc8\xa8\x33\x9c")
+    else:
+        var random: u8[32]
+        try os.random_bytes(random)
+        b.put(random)
+    b.put8((u8)hello.session_size)
+    b.put(hello.session[..<hello.session_size])
+    b.put16((usize)hello.suite)
+    b.put8(0)
+    let extensions = b.open(2)
+    b.put16(0x002b)
+    b.put16(2)
+    b.put16(0x0304)
+    b.put16(0x0033)
+    let key_share = b.open(2)
+    b.put16((usize)group)
+    if not retry:
+        b.put16(share.length)
+        b.put(share)
+    b.close(key_share, 2)
+    b.close(extensions, 2)
+    b.close(body, 3)
+    return b.size()
+
+## EncryptedExtensions, Certificate, CertificateVerify and server Finished.
+func build_flight(out: u8[], schedule: hs.Schedule*, der: const u8[], d: const u8[], suite: record.Suite) -> usize!:
+    var b = hs.Builder.over(out)
+    b.put(b"\x08\x00\x00\x02\x00\x00")
+    try schedule.add(out[..<6])
+    let certificate_at = b.size()
+    b.put8(hs.certificate)
+    let body = b.open(3)
+    b.put8(0)
+    let list = b.open(3)
+    let entry = b.open(3)
+    b.put(der)
+    b.close(entry, 3)
+    b.put16(0)
+    b.close(list, 3)
+    b.close(body, 3)
+    try schedule.add(out[certificate_at..<b.size()])
+    var transcript_hash: u8[48]
+    let hash_size = try schedule.current(transcript_hash)
+    var content: u8[160]
+    let content_size = hs.verify_content(true, transcript_hash[..<hash_size], content)
+    var digest: u8[32]
+    discard(try crypto.digest(content[..<content_size], digest, "sha256"))
+    var r: u8[32]
+    var s: u8[32]
+    try crypto.ecdsa_p256_sign(d, digest, r, s)
+    let verify_at = b.size()
+    b.put8(hs.certificate_verify)
+    let verify_body = b.open(3)
+    b.put16((usize)signature.ecdsa_secp256r1_sha256)
+    let signature_size = b.open(2)
+    let sequence = b.open(2)
+    out[sequence] = 0x30
+    put_der_integer(&b, r)
+    put_der_integer(&b, s)
+    out[sequence + 1] = (u8)(b.size() - sequence - 2)
+    b.close(signature_size, 2)
+    b.close(verify_body, 3)
+    try schedule.add(out[verify_at..<b.size()])
+    var verify: u8[48]
+    try schedule.finished_value(schedule.handshake_secret(false), verify[..<suite.hash_size])
+    let finished_at = b.size()
+    b.put8(hs.finished)
+    let finished_body = b.open(3)
+    b.put(verify[..<suite.hash_size])
+    b.close(finished_body, 3)
+    try schedule.add(out[finished_at..<b.size()])
+    return b.size()
+
+## A minimal DER INTEGER for a 32-byte unsigned big-endian value.
+func put_der_integer(b: hs.Builder*, value: const u8[]):
+    var start: usize = 0
+    while start + 1 < value.length and value[start] == 0:
+        start += 1
+    let sign_byte = value[start] >= 0x80
+    b.put8(0x02)
+    b.put8((u8)(value.length - start + (1 if sign_byte else 0)))
+    if sign_byte:
+        b.put8(0)
+    b.put(value[start..])

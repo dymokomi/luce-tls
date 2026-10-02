@@ -1,0 +1,89 @@
+## Public keys taken from certificates and the TLS 1.3 signature schemes that
+## verify a CertificateVerify with them (RFC 8446 §4.2.3). Verification only.
+import crypto_native as crypto
+
+pub let invalid = crypto.invalid
+
+## Public-key kinds.
+pub let key_none: u8 = 0
+pub let key_p256: u8 = 1
+pub let key_p384: u8 = 2
+
+## TLS signature schemes this client verifies.
+pub let ecdsa_secp256r1_sha256: u16 = 0x0403
+pub let ecdsa_secp384r1_sha384: u16 = 0x0503
+
+## A certificate subject's public key. EC coordinates are big-endian and use the
+## first 32 (P-256) or 48 (P-384) bytes.
+pub struct PublicKey:
+    pub var kind: u8
+    pub var x: u8[48]
+    pub var y: u8[48]
+
+    ## A P-256 key from 32-byte coordinates.
+    pub static func p256(x: const u8[], y: const u8[]) -> PublicKey!:
+        if x.length != 32 or y.length != 32:
+            error(invalid, "P-256 coordinates must be 32 bytes")
+        var key = PublicKey(kind = key_p256)
+        for i in 0..<32:
+            key.x[i] = x[i]
+            key.y[i] = y[i]
+        return key
+
+    ## A P-384 key from 48-byte coordinates.
+    pub static func p384(x: const u8[], y: const u8[]) -> PublicKey!:
+        if x.length != 48 or y.length != 48:
+            error(invalid, "P-384 coordinates must be 48 bytes")
+        var key = PublicKey(kind = key_p384)
+        for i in 0..<48:
+            key.x[i] = x[i]
+            key.y[i] = y[i]
+        return key
+
+## The signature schemes to offer in signature_algorithms, as wire bytes.
+pub let offered_schemes = b"\x04\x03"
+
+## Verify a TLS signature `scheme` over `content` made by `key`. A scheme that
+## does not fit the key, or a malformed signature, is a failure.
+pub func verify_scheme(key: const PublicKey*, scheme: u16, content: const u8[], signature: const u8[]) -> !:
+    if scheme == ecdsa_secp256r1_sha256 and key.kind == key_p256:
+        var digest: u8[32]
+        discard(try crypto.digest(content, digest, "sha256"))
+        var r: u8[32]
+        var s: u8[32]
+        try parse_ecdsa(signature, r, s)
+        if not (try crypto.ecdsa_p256_verify(key.x[..<32], key.y[..<32], digest, r, s)):
+            error(invalid, "TLS CertificateVerify signature is invalid")
+        return
+    error(invalid, "the server used a signature scheme that does not match its key")
+
+## Decode a DER Ecdsa-Sig-Value into fixed-width big-endian r and s.
+pub func parse_ecdsa(der: const u8[], r: u8[], s: u8[]) -> !:
+    if der.length < 8 or der[0] != 0x30 or der[1] >= 0x80 or (usize)der[1] != der.length - 2:
+        error(invalid, "ECDSA signature is not a short DER SEQUENCE")
+    let after_r = try parse_integer(der, 2, r)
+    let after_s = try parse_integer(der, after_r, s)
+    if after_s != der.length:
+        error(invalid, "trailing bytes after the ECDSA signature")
+
+func parse_integer(der: const u8[], at: usize, out: u8[]) -> usize!:
+    if der.length - at < 3 or der[at] != 0x02 or der[at + 1] >= 0x80:
+        error(invalid, "ECDSA signature field is not a short INTEGER")
+    let length = (usize)der[at + 1]
+    let start = at + 2
+    if length == 0 or length > der.length - start or (der[start] & 0x80) != 0:
+        error(invalid, "ECDSA INTEGER is empty, truncated or negative")
+    if length > 1 and der[start] == 0 and der[start + 1] < 0x80:
+        error(invalid, "ECDSA INTEGER has a redundant sign byte")
+    var first = start
+    var count = length
+    if count > 1 and der[first] == 0:
+        first += 1
+        count -= 1
+    if count > out.length:
+        error(invalid, "ECDSA INTEGER is wider than the curve")
+    for i in 0..<out.length:
+        out[i] = 0
+    for i in 0..<count:
+        out[out.length - count + i] = der[first + i]
+    return start + length

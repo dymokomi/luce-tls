@@ -1,10 +1,10 @@
 #prisma 4.0
 def package "luce-tls" {
     str owner = "dymokomi"
-    str version = "0.1.3"
+    str version = "0.1.4"
     str kind = "package"
     str language = "luce-base"
-    str description = "Native Luce Base TLS 1.3. MIT OR Apache-2.0."
+    str description = "Native Luce Base TLS 1.3 client: TlsStream (io.Reader/io.Writer) with deadlines and STARTTLS, certificate validation, and a small private-endpoint server. Experimental. MIT OR Apache-2.0."
     str readme = "README.md"
 
     def export "tls" {
@@ -21,6 +21,10 @@ def package "luce-tls" {
 
     def export "session" {
         str module = "luce_tls.session"
+    }
+
+    def export "tls_stream" {
+        str module = "luce_tls.stream"
     }
 
     def dependency "luce-crypto" {
