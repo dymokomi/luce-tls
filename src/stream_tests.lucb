@@ -4,15 +4,15 @@
 ## an in-place STARTTLS upgrade (answering a CertificateRequest), close_notify
 ## and a wrong pin.
 import io
-import net
+import luce_std.net
 import c
 import sync
 import thread
-import crypto_native
-import tls_stream
-import luce_tls.record as record
-import luce_tls.server as server
-import luce_tls.x509 as x509
+import luce_crypto.native as crypto_native
+import stream as tls_stream
+import record
+import server
+import x509
 
 var g_d: u8[32]
 var g_qx: u8[32]

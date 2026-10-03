@@ -2,15 +2,15 @@
 ## HelloRetryRequest that moves the key exchange from x25519 to secp256r1, and
 ## a server-initiated KeyUpdate that the client must follow and answer.
 import io
-import net
+import luce_std.net
 import c
 import thread
-import crypto_native
-import tls_stream
-import luce_tls.record as record
-import luce_tls.server as server
-import luce_tls.handshake as hs
-import luce_tls.x509 as x509
+import luce_crypto.native as crypto_native
+import stream as tls_stream
+import record
+import server
+import handshake as hs
+import x509
 
 var g_d: u8[32]
 var g_qx: u8[32]

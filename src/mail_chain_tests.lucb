@@ -4,10 +4,10 @@
 ## valid, untrusted root, broken leaf and intermediate signatures, and a
 ## missing intermediate. Reordered intermediates must still validate.
 import c
-import files
-import luce_tls.anchors as anchors
-import luce_tls.chain as chain
-import luce_tls.signature as signature
+import luce_std.files
+import anchors
+import chain
+import signature
 
 let fixtures: str[9] = ["imap.gmail.com-993.txt", "smtp.gmail.com-465.txt", "smtp.gmail.com-587.txt",
     "imap.mail.me.com-993.txt", "smtp.mail.me.com-587.txt", "outlook.office365.com-993.txt",

@@ -7,8 +7,8 @@
 ## the bytes of one record at a time, so socket readiness and `pending` together
 ## describe everything that is available.
 import io
-import crypto_native as crypto
-import luce_tls.tls as tls
+import luce_crypto.native as crypto
+import tls
 
 pub let invalid = crypto.invalid
 

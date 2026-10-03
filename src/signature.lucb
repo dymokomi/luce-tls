@@ -2,7 +2,7 @@
 ## this client checks with them: X.509 certificate signatures (ECDSA, RSA
 ## PKCS#1 v1.5, RSA-PSS) and TLS 1.3 CertificateVerify schemes (RFC 8446
 ## §4.2.3). Verification only.
-import crypto_native as crypto
+import luce_crypto.native as crypto
 
 pub let invalid = crypto.invalid
 

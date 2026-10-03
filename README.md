@@ -14,8 +14,8 @@ transport glue. It upgrades in place for STARTTLS.
 
 ```luce
 import io
-import net
-import tls_stream
+import luce_std.net
+import luce_tls.stream as tls_stream
 
 # Implicit TLS (IMAPS 993, SMTPS 465), validated against the public roots.
 var stream = try tls_stream.Stream.connect("imap.example.com", 993, true)

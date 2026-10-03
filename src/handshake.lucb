@@ -5,9 +5,9 @@
 import io
 import memory
 import os
-import crypto_native as crypto
-import luce_tls.tls as tls
-import luce_tls.record as record
+import luce_crypto.native as crypto
+import tls
+import record
 
 pub let invalid = crypto.invalid
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/luce_tls/roots.lucb from Mozilla's NSS certdata.txt.
+"""Generate src/roots.lucb from Mozilla's NSS certdata.txt.
 
 Usage: tools/mozilla_roots.py CERTDATA
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "src/luce_tls/roots.lucb"
+OUTPUT = ROOT / "src/roots.lucb"
 
 RSA = bytes.fromhex("2a864886f70d010101")
 EC = bytes.fromhex("2a8648ce3d0201")

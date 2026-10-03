@@ -2,13 +2,13 @@
 ## `Secrets` (the record channel) and passes both to `send`/`receive`. These
 ## calls block on the connection. New code should prefer `tls_stream.Stream`,
 ## which owns both, implements io.Reader/io.Writer and supports deadlines.
-import net
+import luce_std.net
 import c
-import luce_tls.record as record
-import luce_tls.client as client
-import luce_tls.server as server
-import luce_tls.trust as trust
-import luce_tls.chain as chain
+import record
+import client
+import server
+import trust
+import chain
 
 pub let invalid = record.invalid
 

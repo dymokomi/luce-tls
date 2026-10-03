@@ -5,8 +5,8 @@
 ## constraints, key usage, extended key usage, subject alternative names).
 ## Unknown critical extensions and name constraints are rejected; a critical
 ## certificatePolicies extension is accepted only with CPS-pointer qualifiers.
-import luce_tls.der as der
-import luce_tls.signature as signature
+import der
+import signature
 
 pub let invalid = der.invalid
 pub let max_certificate_bytes: usize = 16384

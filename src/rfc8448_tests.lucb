@@ -9,12 +9,12 @@
 ## verifying the CertificateVerify signature with it; RSA-PSS at 1024 bits is
 ## covered by luce-crypto's Wycheproof vectors.
 import io
-import crypto_native as crypto
-import luce_tls.certificate as certificate
-import luce_tls.der as der
-import luce_tls.handshake as hs
-import luce_tls.record as record
-import luce_tls.vector_file as vectors
+import luce_crypto.native as crypto
+import certificate
+import der
+import handshake as hs
+import record
+import vector_file as vectors
 
 ## The trace items, looked up by name, and how many items and records were
 ## compared.

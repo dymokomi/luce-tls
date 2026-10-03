@@ -9,16 +9,16 @@ ROOT = Path(__file__).resolve().parents[1]
 MODES = {f"native{i}": ["--native", "--opt", str(i)] for i in range(4)}
 MODES.update({"c": ["--backend=c"], "c-release": ["--backend=c", "--release"]})
 SOURCES = [
-    ("src/luce_tls/tls_tests.lucb", "tls-tests"),
-    ("src/luce_tls/session_tests.lucb", "session-tests"),
-    ("src/luce_tls/stream_tests.lucb", "stream-tests"),
-    ("src/luce_tls/handshake_tests.lucb", "handshake-tests"),
-    ("src/luce_tls/x509_tests.lucb", "x509-tests"),
-    ("src/luce_tls/chain_tests.lucb", "chain-tests"),
-    ("src/luce_tls/mail_chain_tests.lucb", "mail-chain-tests"),
-    ("src/luce_tls/x509_suite_tests.lucb", "x509-suite-tests"),
-    ("src/luce_tls/rfc8448_tests.lucb", "rfc8448-tests"),
-    ("src/luce_tls/tls13_kdf_tests.lucb", "tls13-kdf-tests"),
+    ("src/tls_tests.lucb", "tls-tests"),
+    ("src/session_tests.lucb", "session-tests"),
+    ("src/stream_tests.lucb", "stream-tests"),
+    ("src/handshake_tests.lucb", "handshake-tests"),
+    ("src/x509_tests.lucb", "x509-tests"),
+    ("src/chain_tests.lucb", "chain-tests"),
+    ("src/mail_chain_tests.lucb", "mail-chain-tests"),
+    ("src/x509_suite_tests.lucb", "x509-suite-tests"),
+    ("src/rfc8448_tests.lucb", "rfc8448-tests"),
+    ("src/tls13_kdf_tests.lucb", "tls13-kdf-tests"),
 ]
 
 

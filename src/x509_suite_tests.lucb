@@ -4,11 +4,11 @@
 ## Each case lists trust anchors, the certificates in TLS order, a host name
 ## (or none) and a time; the expected verdict is the reference's except for
 ## the documented policy differences in each suite's POLICY.txt.
-import luce_tls.anchors as anchors
-import luce_tls.chain as chain
-import luce_tls.der as der
-import luce_tls.signature as signature
-import luce_tls.vector_file as vectors
+import anchors
+import chain
+import der
+import signature
+import vector_file as vectors
 
 ## A TLS 1.3 Certificate message with the listed files in order.
 func certificate_message(directory: str, names: const u8[], out: u8[]) -> usize!:

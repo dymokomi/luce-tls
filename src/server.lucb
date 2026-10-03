@@ -6,10 +6,10 @@
 import io
 import memory
 import os
-import crypto_native as crypto
-import luce_tls.record as record
-import luce_tls.handshake as hs
-import luce_tls.signature as signature
+import luce_crypto.native as crypto
+import record
+import handshake as hs
+import signature
 
 pub let invalid = crypto.invalid
 

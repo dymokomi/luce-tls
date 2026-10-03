@@ -1,6 +1,6 @@
 ## TLS 1.3 building blocks shared by the client and server: record header
 ## parsing, DNS host-name matching and HKDF-Expand-Label.
-import crypto_native
+import luce_crypto.native as crypto_native
 
 pub let invalid = crypto_native.invalid
 

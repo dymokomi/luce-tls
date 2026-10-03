@@ -4,10 +4,10 @@
 ## followed by HKDF-Extract, as handshake.Schedule computes it. Data:
 ## tests/vectors/openssl_tls13_kdf.txt (tools/openssl_tls13_kdf.py); stanzas
 ## outside TLS 1.3 client use are listed there as `skip` with a reason.
-import crypto_native as crypto
-import luce_tls.der as der
-import luce_tls.tls as tls
-import luce_tls.vector_file as vectors
+import luce_crypto.native as crypto
+import der
+import tls
+import vector_file as vectors
 
 ## HKDF-Extract with the derived salt of `salt`, or zeros without one.
 func extract(lines: const vectors.Lines*, algorithm: str, size: usize, out: u8[]) -> !:

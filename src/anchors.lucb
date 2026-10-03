@@ -3,9 +3,9 @@
 ## key, or a short list of named anchors (subject Name and key). A named or
 ## bundled anchor must match the issuer Name of the certificate it signs; an
 ## explicit single key matches any issuer Name.
-import luce_tls.certificate as certificate
-import luce_tls.roots as roots
-import luce_tls.signature as signature
+import certificate
+import roots
+import signature
 
 pub let invalid = signature.invalid
 ## The most named anchors one set holds.

@@ -1,7 +1,7 @@
 ## Private-endpoint certificates: `mint_self_signed` makes a P-256 certificate
 ## for a host name. Parsing and validation of certificates live in
 ## `certificate` and `chain`.
-import crypto_native
+import luce_crypto.native as crypto_native
 
 pub let invalid = crypto_native.invalid
 
