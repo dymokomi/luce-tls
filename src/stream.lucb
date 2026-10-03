@@ -5,7 +5,7 @@
 ## stream's deadline and cancellation signal, so another thread can cancel a
 ## blocked read (an IMAP IDLE) and a timed-out TLS read resumes intact.
 import io
-import luce_std.net
+from luce_std import net
 import c
 import sync
 import platform

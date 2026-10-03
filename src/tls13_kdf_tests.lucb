@@ -4,7 +4,7 @@
 ## followed by HKDF-Extract, as handshake.Schedule computes it. Data:
 ## tests/vectors/openssl_tls13_kdf.txt (tools/openssl_tls13_kdf.py); stanzas
 ## outside TLS 1.3 client use are listed there as `skip` with a reason.
-import luce_crypto.native as crypto
+from luce_crypto import native as crypto
 import der
 import tls
 import vector_file as vectors

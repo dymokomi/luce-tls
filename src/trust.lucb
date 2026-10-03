@@ -1,6 +1,6 @@
 ## What a client trusts, and how it authenticates a server's TLS Certificate
 ## message under that trust to obtain the leaf public key.
-import luce_crypto.native as crypto
+from luce_crypto import native as crypto
 import anchors
 import chain
 import signature

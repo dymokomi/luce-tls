@@ -6,7 +6,7 @@
 ## signature verifies (ECDSA P-256/P-384, RSA PKCS#1 v1.5 or PSS). Extra,
 ## duplicate or unparsable certificates that no path needs are ignored.
 ## No revocation checking and no policy processing.
-import luce_crypto.native as crypto
+from luce_crypto import native as crypto
 import anchors
 import certificate
 import signature

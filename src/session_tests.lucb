@@ -1,8 +1,8 @@
 ## Loopback TLS 1.3 client/server with a minted self-signed P-256 certificate.
 import session as tls
-import luce_std.net
+from luce_std import net
 import thread
-import luce_crypto.native as crypto_native
+from luce_crypto import native as crypto_native
 import x509
 import c
 import io

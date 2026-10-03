@@ -2,7 +2,7 @@
 ## minimal definite lengths, OID comparison, positive INTEGERs, and RFC 5280
 ## UTCTime/GeneralizedTime as Unix seconds. Every read is checked against its
 ## container; malformed input fails with `invalid`, never reads out of range.
-import luce_crypto.native as crypto
+from luce_crypto import native as crypto
 
 pub let invalid = crypto.invalid
 

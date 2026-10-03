@@ -2,7 +2,7 @@
 ## against the Google WE1 intermediate key (ECDSA-P256 over SHA-256), and a
 ## minted self-signed certificate.
 from x509 import mint_self_signed
-import luce_crypto.native as crypto_native
+from luce_crypto import native as crypto_native
 import certificate
 import chain
 import signature

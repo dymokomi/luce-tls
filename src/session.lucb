@@ -2,7 +2,7 @@
 ## `Secrets` (the record channel) and passes both to `send`/`receive`. These
 ## calls block on the connection. New code should prefer `tls_stream.Stream`,
 ## which owns both, implements io.Reader/io.Writer and supports deadlines.
-import luce_std.net
+from luce_std import net
 import c
 import record
 import client

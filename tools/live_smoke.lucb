@@ -7,7 +7,7 @@
 ##   https          TLS on connect, HTTP/1.1 HEAD /
 ## Prints each server line and "OK <host>:<port>" or the failure.
 import io
-import luce_std.net
+from luce_std import net
 import stream as tls_stream
 
 ## Read one CRLF-terminated line through a Reader; returns its length.

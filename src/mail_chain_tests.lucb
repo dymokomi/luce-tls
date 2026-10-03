@@ -4,7 +4,7 @@
 ## valid, untrusted root, broken leaf and intermediate signatures, and a
 ## missing intermediate. Reordered intermediates must still validate.
 import c
-import luce_std.files
+from luce_std import files
 import anchors
 import chain
 import signature

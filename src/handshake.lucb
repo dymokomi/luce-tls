@@ -5,7 +5,7 @@
 import io
 import memory
 import os
-import luce_crypto.native as crypto
+from luce_crypto import native as crypto
 import tls
 import record
 
