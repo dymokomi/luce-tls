@@ -1,0 +1,68 @@
+## OpenSSL's TLS13-KDF vectors (evpkdf_tls13_kdf.txt, ACVP-derived TLS 1.3
+## key schedules over SHA-256 and SHA-384) through tls.expand_label and HKDF.
+## An extract step is the key schedule's Derive-Secret(salt, "derived", "")
+## followed by HKDF-Extract, as handshake.Schedule computes it. Data:
+## tests/vectors/openssl_tls13_kdf.txt (tools/openssl_tls13_kdf.py); stanzas
+## outside TLS 1.3 client use are listed there as `skip` with a reason.
+import crypto_native as crypto
+import luce_tls.der as der
+import luce_tls.tls as tls
+import luce_tls.vector_file as vectors
+
+## HKDF-Extract with the derived salt of `salt`, or zeros without one.
+func extract(lines: const vectors.Lines*, algorithm: str, size: usize, out: u8[]) -> !:
+    var key: u8[64]
+    var key_size = try lines.decode(2, key)
+    if key_size == 0:
+        key_size = size
+    var salt: u8[64]
+    let salt_size = try lines.decode(3, salt)
+    var derived: u8[64]
+    if salt_size != 0:
+        var label: u8[64]
+        let label_size = try lines.decode(4, label)
+        var empty_hash: u8[64]
+        discard(try crypto.digest(b"", empty_hash, algorithm))
+        try tls.expand_label(salt[..<salt_size], label[..<label_size], empty_hash[..<size], derived[..<size], algorithm)
+    discard(try crypto.hkdf_extract(key[..<key_size], derived[..<size], out, algorithm))
+
+## HKDF-Expand-Label of the current line into `out`.
+func expand(lines: const vectors.Lines*, algorithm: str, out: u8[]) -> !:
+    var key: u8[64]
+    let key_size = try lines.decode(2, key)
+    var context: u8[64]
+    let context_size = try lines.decode(3, context)
+    var label: u8[256]
+    let label_size = try lines.decode(4, label)
+    try tls.expand_label(key[..<key_size], label[..<label_size], context[..<context_size], out, algorithm)
+
+## Optional argument: the tests/vectors directory.
+pub func main(arguments: str[]) -> i32!:
+    let directory = arguments[1] if arguments.length > 1 else "tests/vectors"
+    var lines = try vectors.Lines.open(directory, b"openssl_tls13_kdf.txt")
+    defer lines.close()
+    var extracted: usize = 0
+    var expanded: usize = 0
+    var skipped: usize = 0
+    while lines.next():
+        if try lines.is(0, b"skip"):
+            skipped += 1
+            continue
+        let algorithm = "sha384" if try lines.is(1, b"sha384") else "sha256"
+        let size: usize = 48 if try lines.is(1, b"sha384") else 32
+        var wanted: u8[256]
+        let wanted_size = try lines.decode(5, wanted)
+        var out: u8[256]
+        if try lines.is(0, b"extract"):
+            assert(wanted_size == size, "an extract outputs one hash length")
+            try extract(&lines, algorithm, size, out)
+            extracted += 1
+        else:
+            try expand(&lines, algorithm, out[..<wanted_size])
+            expanded += 1
+        if not der.same(out[..<wanted_size], wanted[..<wanted_size]):
+            print(f"TLS13-KDF case {extracted + expanded} differs")
+            error(der.invalid, "OpenSSL TLS13-KDF vector mismatch")
+    assert(extracted + expanded == 562 and skipped == 9, "every TLS13-KDF stanza is run or listed")
+    print(f"PASS OpenSSL TLS13-KDF: {extracted} extract + {expanded} expand (+{skipped} out of scope)")
+    return 0

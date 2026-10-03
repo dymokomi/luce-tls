@@ -1,0 +1,266 @@
+## RFC 8448 §3 (Simple 1-RTT Handshake, TLS_AES_128_GCM_SHA256 over x25519)
+## replayed end to end: the trace's own HKDF steps, the x25519 exchange, the
+## key schedule and transcript, Finished values, and every record both sides
+## send, which must come out of the record layer byte for byte and decrypt on
+## the other side. Data: tests/vectors/rfc8448_1rtt.txt (tools/rfc8448_vectors.py).
+##
+## The trace's server certificate has a 1024-bit RSA key, below this client's
+## 2048-bit floor, so the test checks that the certificate is refused rather than
+## verifying the CertificateVerify signature with it; RSA-PSS at 1024 bits is
+## covered by luce-crypto's Wycheproof vectors.
+import io
+import crypto_native as crypto
+import luce_tls.certificate as certificate
+import luce_tls.der as der
+import luce_tls.handshake as hs
+import luce_tls.record as record
+import luce_tls.vector_file as vectors
+
+## The trace items, looked up by name, and how many items and records were
+## compared.
+struct Trace:
+    var lines: vectors.Lines
+    var checked: usize
+    var records: usize
+
+    ## Decode item `name` into `out`; returns its length.
+    mutating func get(name: const u8[], out: u8[]) -> usize!:
+        try self.lines.find(name)
+        return try self.lines.decode(1, out)
+
+    ## Fail unless `value` equals item `name`.
+    mutating func expect(name: const u8[], value: const u8[]) -> !:
+        var wanted: u8[8192]
+        let size = try self.get(name, wanted)
+        if not der.same(wanted[..<size], value):
+            print(f"RFC 8448 item {(str)name} differs")
+            error(der.invalid, "RFC 8448 trace mismatch")
+        self.checked += 1
+
+## `base` followed by `suffix`, written into `out`.
+func joined(base: const u8[], suffix: const u8[], out: u8[]) -> const u8[]:
+    for i in 0..<base.length:
+        out[i] = base[i]
+    for i in 0..<suffix.length:
+        out[base.length + i] = suffix[i]
+    return out[..<base.length + suffix.length]
+
+func ends_with(text: const u8[], suffix: const u8[]) -> bool:
+    return text.length >= suffix.length and der.same(text[text.length - suffix.length..], suffix)
+
+func contains(text: const u8[], part: const u8[]) -> bool:
+    var at: usize = 0
+    while at + part.length <= text.length:
+        if der.same(text[at..<at + part.length], part):
+            return true
+        at += 1
+    return false
+
+## Recompute HKDF-Expand for item `base` + `output` from `base`.prk and
+## `base` + `info`.
+func expand_step(trace: Trace*, base: const u8[], info: const u8[], output: const u8[]) -> !:
+    var name: u8[160]
+    var prk: u8[64]
+    let prk_size = try trace.get(joined(base, b".prk", name), prk)
+    var label: u8[256]
+    let label_size = try trace.get(joined(base, info, name), label)
+    var wanted: u8[64]
+    let size = try trace.get(joined(base, output, name), wanted)
+    var out: u8[64]
+    try crypto.hkdf_expand(prk[..<prk_size], label[..<label_size], out[..<size])
+    try trace.expect(joined(base, output, name), out[..<size])
+
+## Every HKDF-Extract and HKDF-Expand step of the trace, recomputed from the
+## inputs it lists (an extract without a salt uses zeros). Returns the count.
+func hkdf_steps(trace: Trace*, walk: vectors.Lines*) -> usize!:
+    var count: usize = 0
+    var name: u8[160]
+    while walk.next():
+        let item = try walk.field(0)
+        if ends_with(item, b".secret") and contains(item, b".extract_secret_"):
+            let base = item[..<item.length - 7]
+            var ikm: u8[64]
+            let ikm_size = try trace.get(joined(base, b".ikm", name), ikm)
+            var salt: u8[64]
+            var salt_size: usize = 32
+            if try trace.lines.seek(joined(base, b".salt", name)):
+                salt_size = try trace.lines.decode(1, salt)
+            var out: u8[64]
+            let size = try crypto.hkdf_extract(ikm[..<ikm_size], salt[..<salt_size], out)
+            try trace.expect(item, out[..<size])
+            count += 1
+        elif ends_with(item, b".key_expanded"):
+            try expand_step(trace, item[..<item.length - 13], b".key_info", b".key_expanded")
+            count += 1
+        elif ends_with(item, b".iv_expanded"):
+            try expand_step(trace, item[..<item.length - 12], b".iv_info", b".iv_expanded")
+            count += 1
+        elif ends_with(item, b".expanded"):
+            try expand_step(trace, item[..<item.length - 9], b".info", b".expanded")
+            count += 1
+    return count
+
+## Both x25519 key pairs and the shared secret from each side.
+func key_exchange(trace: Trace*) -> !:
+    var client_private: u8[32]
+    discard(try trace.get(b"client.create_an_ephemeral_x25519_key_pair.1.private_key", client_private))
+    var server_private: u8[32]
+    discard(try trace.get(b"server.create_an_ephemeral_x25519_key_pair.1.private_key", server_private))
+    var client_public: u8[32]
+    try crypto.x25519_base(client_public, client_private)
+    try trace.expect(b"client.create_an_ephemeral_x25519_key_pair.1.public_key", client_public)
+    var server_public: u8[32]
+    try crypto.x25519_base(server_public, server_private)
+    try trace.expect(b"server.create_an_ephemeral_x25519_key_pair.1.public_key", server_public)
+    var shared: u8[32]
+    try crypto.x25519(shared, client_private, server_public)
+    try trace.expect(b"server.extract_secret_handshake.1.ikm", shared)
+    try crypto.x25519(shared, server_private, client_public)
+    try trace.expect(b"server.extract_secret_handshake.1.ikm", shared)
+
+## The traced connection: one key schedule (both sides compute the same) and
+## each side's record channel.
+struct Connection:
+    var suite: record.Suite
+    var schedule: hs.Schedule
+    var client: record.Channel
+    var server: record.Channel
+
+## Send trace record `step` (its payload as content type `kind`) from `sender`,
+## compare the bytes on the wire with its complete_record, then receive them on
+## `receiver` and compare the plaintext. A received close_notify must close.
+## Records always carry legacy_record_version 0x0303; RFC 8446 §5.1 also allows
+## 0x0301 on an initial ClientHello, which the trace uses, so `traced_minor`
+## names the version byte the trace has.
+func transfer(trace: Trace*, step: const u8[], kind: u8, sender: record.Channel*, receiver: record.Channel*, traced_minor: u8 = 3) -> !:
+    var name: u8[160]
+    var payload: u8[4096]
+    let size = try trace.get(joined(step, b".payload", name), payload)
+    var wire: u8[4096]
+    var writer = io.SliceWriter.over(wire)
+    try sender.send(&writer, kind, payload[..<size])
+    var traced: u8[4096]
+    let sent = writer.written()
+    for i in 0..<sent.length:
+        traced[i] = sent[i]
+    assert(sent[1] == 3 and sent[2] == 3, "records carry legacy_record_version 0x0303")
+    traced[2] = traced_minor
+    try trace.expect(joined(step, b".complete_record", name), traced[..<sent.length])
+    var reader = io.SliceReader.over(writer.written())
+    if try receiver.next(&reader) != kind or not der.same(receiver.plaintext(), payload[..<size]):
+        print(f"RFC 8448 record {(str)step} did not decrypt to its payload")
+        error(der.invalid, "RFC 8448 record mismatch")
+    if kind == record.alert:
+        try receiver.receive_alert()
+        assert(receiver.closed_by_peer(), "close_notify must close the channel")
+    else:
+        receiver.consume(size)
+    trace.records += 1
+
+## Add trace message `name` to the transcript; returns its length in `out`.
+func add_message(trace: Trace*, connection: Connection*, name: const u8[], out: u8[]) -> usize!:
+    let size = try trace.get(name, out)
+    try connection.schedule.add(out[..<size])
+    return size
+
+## Whether the client refuses this certificate.
+func refused(bytes: const u8[]) -> bool:
+    discard(certificate.parse(bytes) catch: return true)
+    return false
+
+## ClientHello and ServerHello in the clear, then the handshake secrets.
+func hello(trace: Trace*, connection: Connection*) -> !:
+    var message: u8[1024]
+    let client_hello = try add_message(trace, connection, b"client.construct_a_clienthello_handshake_message.1.clienthello", message)
+    try trace.expect(b"client.send_handshake_record.1.payload", message[..<client_hello])
+    try transfer(trace, b"client.send_handshake_record.1", record.handshake, &connection.client, &connection.server, 1)
+    let server_hello = try add_message(trace, connection, b"server.construct_a_serverhello_handshake_message.1.serverhello", message)
+    try trace.expect(b"server.send_handshake_record.1.payload", message[..<server_hello])
+    try transfer(trace, b"server.send_handshake_record.1", record.handshake, &connection.server, &connection.client)
+    var transcript_hash: u8[48]
+    let hash_size = try connection.schedule.current(transcript_hash)
+    try trace.expect(b"server.derive_secret_tls13_c_hs_traffic.1.hash", transcript_hash[..<hash_size])
+    var shared: u8[32]
+    discard(try trace.get(b"server.extract_secret_handshake.1.ikm", shared))
+    try connection.schedule.enter_handshake(shared)
+    try trace.expect(b"server.derive_secret_tls13_c_hs_traffic.1.expanded", connection.schedule.handshake_secret(true))
+    try trace.expect(b"server.derive_secret_tls13_s_hs_traffic.1.expanded", connection.schedule.handshake_secret(false))
+
+## The encrypted server flight: EncryptedExtensions, Certificate,
+## CertificateVerify and Finished, and both application traffic secrets.
+func server_flight(trace: Trace*, connection: Connection*) -> !:
+    let secret = connection.schedule.handshake_secret(false)
+    try connection.server.protect_write(connection.suite, secret)
+    try connection.client.protect_read(connection.suite, secret)
+    try transfer(trace, b"server.send_handshake_record.2", record.handshake, &connection.server, &connection.client)
+    var message: u8[1024]
+    discard(try add_message(trace, connection, b"server.construct_an_encryptedextensions_handshake_message.1.encryptedextensions", message))
+    let size = try add_message(trace, connection, b"server.construct_a_certificate_handshake_message.1.certificate", message)
+    # One entry: type, length, empty context, list length, then the certificate.
+    let cert_size = ((usize)message[8] << 16) | ((usize)message[9] << 8) | (usize)message[10]
+    assert(11 + cert_size + 2 == size, "RFC 8448 Certificate has one entry")
+    assert(refused(message[11..<11 + cert_size]), "certificates with 1024-bit RSA keys are refused")
+    let verify_size = try add_message(trace, connection, b"server.construct_a_certificateverify_handshake_message.1.certificateverify", message)
+    assert(verify_size > 8 and message[0] == hs.certificate_verify and message[4] == 0x08 and message[5] == 0x04,
+        "RFC 8448 CertificateVerify uses rsa_pss_rsae_sha256")
+    var finished: u8[48]
+    try connection.schedule.finished_value(secret, finished)
+    try trace.expect(b"server.calculate_finished_tls13_finished.1.finished", finished[..<32])
+    let finished_size = try add_message(trace, connection, b"server.construct_a_finished_handshake_message.1.finished", message)
+    try hs.check_finished(message[..<finished_size], finished[..<32])
+    var transcript_hash: u8[48]
+    let hash_size = try connection.schedule.current(transcript_hash)
+    try trace.expect(b"server.derive_secret_tls13_c_ap_traffic.1.hash", transcript_hash[..<hash_size])
+
+## Application secrets, then the client's encrypted Finished.
+func client_flight(trace: Trace*, connection: Connection*, client_application: u8[], server_application: u8[]) -> !:
+    var finished: u8[48]
+    try connection.schedule.finished_value(connection.schedule.handshake_secret(true), finished)
+    try connection.schedule.enter_application(client_application, server_application)
+    try trace.expect(b"server.derive_secret_tls13_c_ap_traffic.1.expanded", client_application[..<32])
+    try trace.expect(b"server.derive_secret_tls13_s_ap_traffic.1.expanded", server_application[..<32])
+    try trace.expect(b"client.calculate_finished_tls13_finished.2.finished", finished[..<32])
+    var message: u8[64]
+    let size = try add_message(trace, connection, b"client.construct_a_finished_handshake_message.1.finished", message)
+    try hs.check_finished(message[..<size], finished[..<32])
+    let secret = connection.schedule.handshake_secret(true)
+    try connection.client.protect_write(connection.suite, secret)
+    try connection.server.protect_read(connection.suite, secret)
+    try transfer(trace, b"client.send_handshake_record.2", record.handshake, &connection.client, &connection.server)
+    var transcript_hash: u8[48]
+    let hash_size = try connection.schedule.current(transcript_hash)
+    try trace.expect(b"client.derive_secret_tls13_res_master.1.hash", transcript_hash[..<hash_size])
+
+## Under application keys: NewSessionTicket, data both ways, close_notify both ways.
+func application(trace: Trace*, connection: Connection*, client_application: const u8[], server_application: const u8[]) -> !:
+    try connection.client.start_application(connection.suite, server_application, client_application)
+    try connection.server.start_application(connection.suite, client_application, server_application)
+    var ticket: u8[256]
+    let ticket_size = try trace.get(b"server.construct_a_newsessionticket_handshake_message.1.newsessionticket", ticket)
+    try trace.expect(b"server.send_handshake_record.3.payload", ticket[..<ticket_size])
+    try transfer(trace, b"server.send_handshake_record.3", record.handshake, &connection.server, &connection.client)
+    try transfer(trace, b"client.send_application_data_record.1", record.application_data, &connection.client, &connection.server)
+    try transfer(trace, b"server.send_application_data_record.1", record.application_data, &connection.server, &connection.client)
+    try transfer(trace, b"client.send_alert_record.1", record.alert, &connection.client, &connection.server)
+    try transfer(trace, b"server.send_alert_record.1", record.alert, &connection.server, &connection.client)
+
+## Optional argument: the tests/vectors directory.
+pub func main(arguments: str[]) -> i32!:
+    let directory = arguments[1] if arguments.length > 1 else "tests/vectors"
+    var trace = Trace(lines = try vectors.Lines.open(directory, b"rfc8448_1rtt.txt"))
+    defer trace.lines.close()
+    var walk = try vectors.Lines.open(directory, b"rfc8448_1rtt.txt")
+    defer walk.close()
+    let steps = try hkdf_steps(&trace, &walk)
+    try key_exchange(&trace)
+    let suite = try record.suite_for(record.aes_128_gcm_sha256)
+    var connection = Connection(suite = suite, schedule = try hs.Schedule.start(suite))
+    defer connection.schedule.wipe()
+    try hello(&trace, &connection)
+    try server_flight(&trace, &connection)
+    var client_application: u8[48]
+    var server_application: u8[48]
+    try client_flight(&trace, &connection, client_application, server_application)
+    try application(&trace, &connection, client_application[..<32], server_application[..<32])
+    print(f"PASS RFC 8448 1-RTT trace: {steps} HKDF steps, {trace.checked} items compared, {trace.records} records")
+    return 0

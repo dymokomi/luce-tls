@@ -17,6 +17,8 @@ SOURCES = [
     ("src/luce_tls/chain_tests.lucb", "chain-tests"),
     ("src/luce_tls/mail_chain_tests.lucb", "mail-chain-tests"),
     ("src/luce_tls/x509_suite_tests.lucb", "x509-suite-tests"),
+    ("src/luce_tls/rfc8448_tests.lucb", "rfc8448-tests"),
+    ("src/luce_tls/tls13_kdf_tests.lucb", "tls13-kdf-tests"),
 ]
 
 
