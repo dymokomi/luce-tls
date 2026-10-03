@@ -40,6 +40,16 @@ struct Search:
 ## Unix time `now` against `trusted`, and return the authenticated leaf key.
 ## CertificateEntry extensions must be empty, as the client requests none.
 pub func verify_server_chain(message: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> signature.PublicKey!:
+    if host.length == 0:
+        error(invalid, "a server certificate needs a host name to match")
+    return try verify(message, host, now, trusted)
+
+## The same validation without the host-name check, for path-validation test
+## suites that have no server name. TLS clients use `verify_server_chain`.
+pub func verify_chain_without_name(message: const u8[], now: i64, trusted: const anchors.Anchors*) -> signature.PublicKey!:
+    return try verify(message, "", now, trusted)
+
+func verify(message: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> signature.PublicKey!:
     var search = Search(message = message, now = now, reason = "no trusted root issued the certificate chain")
     try split(message, &search)
     let leaf_der = search.der(0)
@@ -90,7 +100,7 @@ func validate_leaf(bytes: const u8[], leaf: const certificate.Certificate*, host
         error(invalid, "the server certificate extendedKeyUsage excludes TLS servers")
     if leaf.algorithm == 0:
         error(invalid, "the server certificate uses an unsupported signature algorithm")
-    if not matches_dns_name(bytes, leaf, host):
+    if host.length != 0 and not matches_dns_name(bytes, leaf, host):
         error(invalid, "the server certificate does not match the host name")
 
 ## Whether a subjectAltName dNSName matches `host` (no common-name fallback).

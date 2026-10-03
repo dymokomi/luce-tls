@@ -1,0 +1,8 @@
+53 OpenSSL auxiliary trust settings on certificates
+1 option -check_ss_sig
+2 option -policy_check
+4 option -verify_depth
+2 option -x509_strict
+10 purpose codesign (only TLS server certificates are validated)
+12 purpose sslclient (only TLS server certificates are validated)
+9 purpose timestampsign (only TLS server certificates are validated)

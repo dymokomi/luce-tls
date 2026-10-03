@@ -3,8 +3,8 @@
 ## signature algorithm and value, issuer and subject Names, validity, the
 ## subject public key, and the extensions path validation uses (basic
 ## constraints, key usage, extended key usage, subject alternative names).
-## Unknown critical extensions and name constraints are rejected; policy
-## extensions are accepted but not processed.
+## Unknown critical extensions and name constraints are rejected; a critical
+## certificatePolicies extension is accepted only with CPS-pointer qualifiers.
 import luce_tls.der as der
 import luce_tls.signature as signature
 
@@ -79,6 +79,8 @@ let oid_sha512_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0d"
 let oid_rsa_pss = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0a"
 let oid_mgf1 = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x08"
 let oid_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01"
+let oid_sha224_rsa = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0e"
+let oid_ecdsa_sha224 = b"\x2a\x86\x48\xce\x3d\x04\x03\x01"
 let oid_ecdsa_sha256 = b"\x2a\x86\x48\xce\x3d\x04\x03\x02"
 let oid_ecdsa_sha384 = b"\x2a\x86\x48\xce\x3d\x04\x03\x03"
 let oid_ecdsa_sha512 = b"\x2a\x86\x48\xce\x3d\x04\x03\x04"
@@ -97,13 +99,15 @@ func parse_algorithm(bytes: const u8[], element: der.Element) -> u8!:
     let oid = try der.expect(bytes, element.content, element.end(), 0x06)
     let has_parameters = oid.next != element.end()
     var rsa_kind: u8 = 0
-    if der.oid_is(bytes, oid, oid_ecdsa_sha256) or der.oid_is(bytes, oid, oid_ecdsa_sha384) or der.oid_is(bytes, oid, oid_ecdsa_sha512):
+    if der.oid_is(bytes, oid, oid_ecdsa_sha224) or der.oid_is(bytes, oid, oid_ecdsa_sha256) or der.oid_is(bytes, oid, oid_ecdsa_sha384) or der.oid_is(bytes, oid, oid_ecdsa_sha512):
         if has_parameters:
             error(invalid, "ECDSA AlgorithmIdentifier has parameters")
+        if der.oid_is(bytes, oid, oid_ecdsa_sha224): return signature.ecdsa_sha224
         if der.oid_is(bytes, oid, oid_ecdsa_sha256): return signature.ecdsa_sha256
         if der.oid_is(bytes, oid, oid_ecdsa_sha384): return signature.ecdsa_sha384
         return signature.ecdsa_sha512
-    if der.oid_is(bytes, oid, oid_sha256_rsa): rsa_kind = signature.rsa_pkcs1_sha256
+    if der.oid_is(bytes, oid, oid_sha224_rsa): rsa_kind = signature.rsa_pkcs1_sha224
+    elif der.oid_is(bytes, oid, oid_sha256_rsa): rsa_kind = signature.rsa_pkcs1_sha256
     elif der.oid_is(bytes, oid, oid_sha384_rsa): rsa_kind = signature.rsa_pkcs1_sha384
     elif der.oid_is(bytes, oid, oid_sha512_rsa): rsa_kind = signature.rsa_pkcs1_sha512
     if rsa_kind != 0:
@@ -301,14 +305,34 @@ func parse_extensions(bytes: const u8[], at: usize, limit: usize, cert: Certific
             try parse_eku(bytes, value, cert)
         elif der.same(id, b"\x55\x1d\x1e"):
             error(invalid, "nameConstraints are not supported")
-        elif critical and not is_policy_extension(id):
+        elif der.same(id, b"\x55\x1d\x20"):
+            if critical:
+                try check_critical_policies(bytes, value)
+        elif critical:
             error(invalid, "unsupported critical certificate extension")
         pos = extension.next
 
-## certificatePolicies, policyMappings, policyConstraints, inhibitAnyPolicy:
-## understood as policy-only, which this client does not enforce.
-func is_policy_extension(id: const u8[]) -> bool:
-    return id.length == 3 and id[0] == 0x55 and id[1] == 0x1d and (id[2] == 0x20 or id[2] == 0x21 or id[2] == 0x24 or id[2] == 0x36)
+## A critical certificatePolicies extension can be ignored only when every
+## policy qualifier is a CPS pointer, which RFC 5280 attaches no processing
+## to (BearSSL's rule; this client does no policy processing).
+## policyMappings, policyConstraints and inhibitAnyPolicy are not processed,
+## so they are refused when critical, as any other unknown extension.
+func check_critical_policies(bytes: const u8[], value: der.Element) -> !:
+    let policies = try der.expect(bytes, value.content, value.end(), 0x30)
+    var pos = policies.content
+    while pos < policies.end():
+        let information = try der.expect(bytes, pos, policies.end(), 0x30)
+        let identifier = try der.expect(bytes, information.content, information.end(), 0x06)
+        if identifier.next < information.end():
+            let qualifiers = try der.expect(bytes, identifier.next, information.end(), 0x30)
+            var at = qualifiers.content
+            while at < qualifiers.end():
+                let qualifier = try der.expect(bytes, at, qualifiers.end(), 0x30)
+                let kind = try der.expect(bytes, qualifier.content, qualifier.end(), 0x06)
+                if not der.oid_is(bytes, kind, b"\x2b\x06\x01\x05\x05\x07\x02\x01"):
+                    error(invalid, "critical certificatePolicies carry a qualifier other than a CPS pointer")
+                at = qualifier.next
+        pos = information.next
 
 ## Parse a DER X.509 v3 certificate.
 pub func parse(bytes: const u8[]) -> Certificate!:

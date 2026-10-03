@@ -1,0 +1,134 @@
+## Test support: reads the line-oriented vector files under tests/ (written by
+## the converters in tools/). A line is space-separated fields; "-" is an empty
+## field. Not exported by the package.
+import c
+import files
+import luce_tls.der as der
+
+## A whole vector file and a cursor over its lines and fields.
+pub struct Lines:
+    var text: u8[]
+    var line_start: usize
+    var line_end: usize
+    var next_start: usize
+
+    ## Load `directory`/`name`.
+    pub static func open(directory: str, name: const u8[]) -> Lines!:
+        var path: u8[1024]
+        return Lines(text = try read(join(directory, name, path)))
+
+    ## Release the file contents.
+    pub mutating func close():
+        if self.text.length > 0:
+            free(self.text)
+        self.text = self.text[..<0]
+
+    ## Advance to the next nonempty line; false at the end of the file.
+    pub mutating func next() -> bool:
+        while self.next_start < self.text.length:
+            self.line_start = self.next_start
+            var end = self.line_start
+            while end < self.text.length and self.text[end] != '\n':
+                end += 1
+            self.line_end = end
+            self.next_start = end + 1
+            if end > self.line_start:
+                return true
+        return false
+
+    ## Return to the start of the file.
+    pub mutating func rewind():
+        self.next_start = 0
+
+    ## Move to the first line whose first field is `name`; false if none.
+    pub mutating func seek(name: const u8[]) -> bool!:
+        self.rewind()
+        while self.next():
+            if der.same(try self.field(0), name):
+                return true
+        return false
+
+    ## Move to the first line whose first field is `name`; fails if none.
+    pub mutating func find(name: const u8[]) -> !:
+        if not try self.seek(name):
+            print(f"missing vector {(str)name}")
+            error(der.invalid, "vector not found")
+
+    ## The text of field `index` (0-based) on the current line; "-" is empty.
+    pub func field(index: usize) -> const u8[]!:
+        var at = self.line_start
+        var current: usize = 0
+        while at < self.line_end:
+            var end = at
+            while end < self.line_end and self.text[end] != ' ':
+                end += 1
+            if current == index:
+                let value = self.text[at..<end]
+                if value.length == 1 and value[0] == '-':
+                    return value[..<0]
+                return value
+            current += 1
+            at = end + 1
+        error(der.invalid, "vector line has too few fields")
+
+    ## Whether field `index` equals `word`.
+    pub func is(index: usize, word: const u8[]) -> bool!:
+        return der.same(try self.field(index), word)
+
+    ## Decode hex field `index` into `out`; returns the byte count.
+    pub func decode(index: usize, out: u8[]) -> usize!:
+        return try decode_hex(try self.field(index), out)
+
+## Read a whole file; the caller frees the result.
+pub func read(path: str) -> u8[]!:
+    var name: u8[1024]
+    if path.length >= name.length:
+        error(der.invalid, "vector path is too long")
+    for i in 0..<path.length:
+        name[i] = path.bytes[i]
+    name[path.length] = 0
+    return try files.read((c.str)(str)name[..<path.length])
+
+## `directory`/`name` written into `out`.
+pub func join(directory: str, name: const u8[], out: u8[]) -> str:
+    for i in 0..<directory.length:
+        out[i] = directory.bytes[i]
+    out[directory.length] = '/'
+    for i in 0..<name.length:
+        out[directory.length + 1 + i] = name[i]
+    return (str)out[..<directory.length + 1 + name.length]
+
+## Decode hex text into `out`; returns the byte count.
+pub func decode_hex(value: const u8[], out: u8[]) -> usize!:
+    if value.length % 2 != 0 or value.length // 2 > out.length:
+        error(der.invalid, "vector hex field has an odd length or is too long")
+    for i in 0..<value.length // 2:
+        out[i] = (try nibble(value[2 * i]) << 4) | try nibble(value[2 * i + 1])
+    return value.length // 2
+
+func nibble(digit: u8) -> u8!:
+    if digit >= '0' and digit <= '9': return digit - '0'
+    if digit >= 'a' and digit <= 'f': return digit - 'a' + 10
+    if digit >= 'A' and digit <= 'F': return digit - 'A' + 10
+    error(der.invalid, "vector field is not hex")
+
+## A decimal field value.
+pub func decimal(text: const u8[]) -> i64:
+    var value: i64 = 0
+    for i in 0..<text.length:
+        value = value * 10 + (i64)(text[i] - '0')
+    return value
+
+## Comma-separated item `index` of `list`, or empty past the end.
+pub func item(list: const u8[], index: usize) -> const u8[]:
+    var at: usize = 0
+    var current: usize = 0
+    while at <= list.length:
+        var stop = at
+        while stop < list.length and list[stop] != ',':
+            stop += 1
+        if current == index:
+            return list[at..<stop]
+        current += 1
+        at = stop + 1
+    return list[..<0]

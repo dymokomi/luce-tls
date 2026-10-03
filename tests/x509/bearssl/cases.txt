@@ -1,0 +1,60 @@
+anchor root rsa 3024310b3009060355040613024341311530130603550403130c4578616d706c6520526f6f74 b6d934d450fdb3af7a73f1ce38bf5d6f45e1fd4eb198c6608326d217d1c5b79aa3c1de6339979cf05e5cc81c17b988196df0b62e3050a1546e93c0dbcf30cb9f1e2779f1c3995235aa3db6dfb0ad7ccb49cdc0ede766102ae9ce281f2150fa774c2ddaef3c58eb4ebfcee9fb1adaa383a3cda3ca9380dcdaf317cc7aab33809cb2d47f463fc53cdc6194b727296e2abc5b0936d4c63b0debbecedb1d1cbc106a7171b3f2ca289a77f28aec42efb14a8ee2f21a322acdc0a6462c9ac28537917f46a19381a17466dfbab339209193fa1da1a885e7e4f907f610f6a82701b67f12c340c3c9e2b0ab49183a64b659b795b59636df2269aa726a544e2729a30e9715 010001
+anchor root-p256 p256 3024310b3009060355040613024341311530130603550403130c4578616d706c6520526f6f74 7174baabb9302e81d5e557f9f320680c9cf964dbb4200d6dea40d04a6e42fdb6 9a682544f6df7bc4fcdedd7bbbc5db7c763f4166406edba787c2e5d8c5f37f8d
+anchor root-p384 p384 3024310b3009060355040613024341311530130603550403130c4578616d706c6520526f6f74 0ed28b3f7f0a38a6db72cb4dac8198c3d595bfabee2e4a3cc6797f1a272c57ad715f96b5fda29c4dd87b75b1438b6a92 c4fd0282a3080a857f28ab31ff8b49f805470a01ee551f7f27c914e7e780ae474558d6f5539bae806626514fe560478b
+anchor root-p521 p521 3024310b3009060355040613024341311530130603550403130c4578616d706c6520526f6f74 0168e669615d1b20f2e753d2c86312f51094d3e5c6cf49e8d73418278cd769fe40a84ad4f34865d59d94d5685b389e0cfd0450754cae81ed1d4a91d0773f7a002ed7 01def2dbdefc7554e74cd600693dbde1a7e09cd9044774c744c7ce575bf8b645ff79fcce06116f61d44fdae62d3046f4eb41decb8219b279a5b8ce2a47f3df0d463b
+anchor root-new p256 3028310b300906035504061302434131193017060355040313104578616d706c6520526f6f74204e6577 65d02336d3aceb9a000b33a6eeca9745efd72a0f7c0b138faaa564e705a3269a 479bb5a041dc1d244ea1d2bb9639c79187d3d63cef79edd1dc65e80027e75997
+anchor ica1 rsa 3031310b300906035504061302434131223020060355040313194578616d706c6520496e7465726d6564696174652043412031 b3e86baf9c1652e3810c50ab25cecc0dc7f21f7f50df2c5c35d6622e632741a7e453a84b27fa1391a3fa094a2f3b5ecf77b38ac1cd49959c750d6474efe4d74bb9a19b68d2307148eaf74b14df3f47a9d8bbec8f28ccfadfb41f947c96fc080528f9e8f42f2fee629c8a3ae0855860b60f2d30b4c04154914c1f5fadf119f0c022a67dd83f793459427b5bb541c4647f52cf3c3722a12f7925942441c23ffac775fb48b50d18a7f454f32e6ed84358c4ab50e805ad91b61e0175b3549cdea09915fbacf15c974951ccef58126f736bb33414010f5a9dfaaad693d3e2eac3abbc4eedcc51a1b8f894b6b42ca8862b1ff6514329525e1389b36a78604e4ec01ba5 010001
+anchor ica2 rsa 3031310b300906035504061302434131223020060355040313194578616d706c6520496e7465726d6564696174652043412032 ae15f7cbeee3961bca63d22681b2d8163423735684fcfdb2e98e9dd0d9d0d706a191ef8d4f604e16bde6529ee557867b7a7ffcbc34ad86ec9150add5c7d18d83e95aba2fdb0db92131faa2fd91ec37836261809c6a82253309df8f7893eacfdb93b0a2687cea873e369c4b379a71e52084c3789a2ba42c7e76d561a9131272f14b411bc6a555ba9d8965c06699c0f17c9b61b24e6601b0a9c4fdc8c1d0c789be2746de6271ba27f52a850f436026bc2a9d07aad608dc26d86956a1d308ded858936b0ec2af783e2574d49f001820bfd7158db9d13d8900a01264e186c0d580f124b2d2fb4c677cae3dc9bf47026de47c0d4490518ccd026237f86fb96701c695 010001
+anchor ee ee 3027310b3009060355040613024341311830160603550403130f7777772e6578616d706c652e636f6d - -
+case base accept 1472580000 www.example.com root ee.crt,ica2.crt,ica1.crt
+case noTA reject 1472580000 www.example.com - ee.crt,ica2.crt,ica1.crt
+case anchorICA1 accept 1472580000 www.example.com ica1 ee.crt,ica2.crt,junk.crt,junk.crt
+case anchorICA2 accept 1472580000 www.example.com ica2 ee.crt,junk.crt,junk.crt
+case directTrust skip 1472580000 www.example.com ee ee.crt,junk.crt,junk.crt
+case wrongName1 reject 1472580000 foo.example.com root ee.crt,ica2.crt,ica1.crt
+case wrongName2 reject 1472580000 www.example.com root ee-names.crt,ica2.crt,ica1.crt
+case goodName1 accept 1472580000 foo.example.com root ee-names.crt,ica2.crt,ica1.crt
+case goodName2 accept 1472580000 barqux.example.com root ee-names.crt,ica2.crt,ica1.crt
+case goodName3 reject 1472580000 www.example.com root ee-names2.crt,ica2.crt,ica1.crt
+case wrongName3 reject 1472580000 foo.example.com root ee-names2.crt,ica2.crt,ica1.crt
+case wrongName4 reject 1472580000 www1.example.com root ee-names3.crt,ica2.crt,ica1.crt
+case ignoreName1 accept 1472580000 - root ee-names3.crt,ica2.crt,ica1.crt
+case wildcard1 reject 1472580000 localhost root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard2 accept 1472580000 example.com root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard3 accept 1472580000 www.example.com root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard4 reject 1472580000 foo.foo.example.com root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard5 accept 1472580000 foo.bar.example.com root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard6 reject 1472580000 foo.bar.example.foobar root ee-names4.crt,ica2.crt,ica1.crt
+case wildcard7 accept 1472580000 foo.*.example.com root ee-names4.crt,ica2.crt,ica1.crt
+case hashSHA256Only accept 1472580000 www.example.com root ee.crt,ica2.crt,ica1.crt
+case hashSHA256Unsupported skip 1472580000 www.example.com root ee.crt,ica2.crt,ica1.crt
+case hashSHA1 reject 1472580000 www.example.com root ee-sha1.crt,ica2.crt,ica1.crt
+case hashSHA224 accept 1472580000 www.example.com root ee-sha224.crt,ica2.crt,ica1.crt
+case hashSHA384 accept 1472580000 www.example.com root ee-sha384.crt,ica2.crt,ica1.crt
+case hashSHA512 accept 1472580000 www.example.com root ee-sha512.crt,ica2.crt,ica1.crt
+case hashMD5 reject 1472580000 www.example.com root ee-md5.crt,ica2.crt,ica1.crt
+case trailingGarbage reject 1472580000 www.example.com root ee-trailing.crt,ica2.crt,ica1.crt
+case badSignature1 reject 1472580000 www.example.com root ee-badsig1.crt,ica2.crt,ica1.crt
+case badSignature2 reject 1472580000 www.example.com root ee-badsig2.crt,ica2.crt,ica1.crt
+case ignoredSignature1 skip 1472580000 www.example.com ee ee-badsig1.crt,ica2.crt,ica1.crt
+case ignoredSignature2 skip 1472580000 www.example.com ee ee-badsig2.crt,ica2.crt,ica1.crt
+case rsa1016 reject 1472580000 www.example.com root ee.crt,ica2-1016.crt,ica1-1016.crt
+case rsa1017 reject 1472580000 www.example.com root ee.crt,ica2-1017.crt,ica1-1017.crt
+case rsa4096 accept 1472580000 www.example.com root ee.crt,ica2-4096.crt,ica1-4096.crt
+case date1 reject 1266406834 www.example.com ica2 ee-dates.crt,ica2.crt,ica1.crt
+case date2 accept 1266406836 www.example.com ica2 ee-dates.crt,ica2.crt,ica1.crt
+case date3 accept 4056707467 www.example.com ica2 ee-dates.crt,ica2.crt,ica1.crt
+case date4 reject 4056707469 www.example.com ica2 ee-dates.crt,ica2.crt,ica1.crt
+case notCA reject 1472580000 www.example.com root ee-dates.crt,ica2-notCA.crt,ica1.crt
+case secp256r1 accept 1472580000 www.example.com root-p256 ee-p256.crt,ica2-p256.crt,ica1-p256.crt
+case secp384r1 accept 1472580000 www.example.com root-p384 ee-p384.crt,ica2-p384.crt,ica1-p384.crt
+case secp521r1 skip 1472580000 www.example.com root-p521 ee-p521.crt,ica2-p521.crt,ica1-p521.crt
+case secp256r1-sha1 reject 1472580000 www.example.com root-p256 ee-p256-sha1.crt,ica2-p256.crt,ica1-p256.crt
+case secp256r1-sha224 accept 1472580000 www.example.com root-p256 ee-p256-sha224.crt,ica2-p256.crt,ica1-p256.crt
+case secp256r1-sha256 accept 1472580000 www.example.com root-p256 ee-p256-sha256.crt,ica2-p256.crt,ica1-p256.crt
+case secp256r1-sha384 accept 1472580000 www.example.com root-p256 ee-p256-sha384.crt,ica2-p256.crt,ica1-p256.crt
+case secp256r1-sha512 accept 1472580000 www.example.com root-p256 ee-p256-sha512.crt,ica2-p256.crt,ica1-p256.crt
+case certpol-noncrit accept 1472580000 www.example.com root-new ee-cp1.crt
+case certpol-noqual accept 1472580000 www.example.com root-new ee-cp2.crt
+case certpol-qualcps accept 1472580000 www.example.com root-new ee-cp3.crt
+case certpol-qualother reject 1472580000 www.example.com root-new ee-cp4.crt

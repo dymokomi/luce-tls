@@ -1,40 +1,82 @@
-## Trust anchors for certificate path validation: the bundled Mozilla root
-## set (generated into roots.lucb) or one explicit public key. A bundled anchor
-## is a subject Name with its key; an explicit key matches any issuer name and
-## is trusted for whatever certificate its signature verifies.
+## Trust anchors for certificate path validation (RFC 5280 §6.1.1 (d)): the
+## bundled Mozilla root set (generated into roots.lucb), one explicit public
+## key, or a short list of named anchors (subject Name and key). A named or
+## bundled anchor must match the issuer Name of the certificate it signs; an
+## explicit single key matches any issuer Name.
+import luce_tls.certificate as certificate
 import luce_tls.roots as roots
 import luce_tls.signature as signature
 
+pub let invalid = signature.invalid
+## The most named anchors one set holds.
+pub let max_named: usize = 8
+
+let kind_single: u8 = 0
+let kind_bundled: u8 = 1
+let kind_named: u8 = 2
+
 ## A set of trust anchors.
 pub struct Anchors:
-    var bundled: bool
+    var kind: u8
     var key: signature.PublicKey
+    var names: u8[2048]
+    var name_end: usize[8]
+    var keys: signature.PublicKey[8]
+    var named: usize
 
     ## The Mozilla roots trusted for TLS server authentication.
     pub static func mozilla() -> Anchors:
-        return Anchors(bundled = true)
+        return Anchors(kind = kind_bundled)
 
     ## A single explicit key, for private servers or pinned public roots.
     pub static func single(key: signature.PublicKey) -> Anchors:
-        return Anchors(key = key)
+        return Anchors(kind = kind_single, key = key)
+
+    ## An empty list of named anchors; fill it with `add` or `add_certificate`.
+    pub static func named_list() -> Anchors:
+        return Anchors(kind = kind_named)
+
+    ## Add an anchor with this subject Name (DER) and key.
+    pub mutating func add(subject: const u8[], key: signature.PublicKey) -> !:
+        let start = 0 if self.named == 0 else self.name_end[self.named - 1]
+        if self.kind != kind_named or self.named == max_named or subject.length > self.names.length - start:
+            error(invalid, "too many or too large named trust anchors")
+        for i in 0..<subject.length:
+            self.names[start + i] = subject[i]
+        self.name_end[self.named] = start + subject.length
+        self.keys[self.named] = key
+        self.named += 1
+
+    ## Add the subject Name and key of a (root) certificate as an anchor. Only
+    ## the Name and key are used, as RFC 5280 trust anchors are.
+    pub mutating func add_certificate(der: const u8[]) -> !:
+        let cert = try certificate.parse(der)
+        try self.add(cert.subject(der), try cert.public_key(der))
 
     ## The number of anchors.
     pub func count() -> usize:
-        if self.bundled:
+        if self.kind == kind_bundled:
             return roots.count
+        if self.kind == kind_named:
+            return self.named
         return 1
 
     ## The subject Name of anchor `i`; empty for an explicit key.
     pub func subject(i: usize) -> const u8[]:
-        if not self.bundled:
+        if self.kind == kind_single:
             return b""
+        if self.kind == kind_named:
+            let start = 0 if i == 0 else self.name_end[i - 1]
+            return self.names[start..<self.name_end[i]]
         let start = (usize)roots.index[i * 7]
         return roots.data[start..<start + (usize)roots.index[i * 7 + 1]]
 
     ## The public key of anchor `i`.
     pub func key_at(i: usize) -> signature.PublicKey!:
-        if not self.bundled:
+        if self.kind == kind_single:
             return self.key
+        if self.kind == kind_named:
+            return self.keys[i]
         let row = i * 7
         let a_start = (usize)roots.index[row + 3]
         let a = roots.data[a_start..<a_start + (usize)roots.index[row + 4]]

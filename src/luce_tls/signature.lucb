@@ -13,7 +13,8 @@ pub let key_p384: u8 = 2
 pub let key_rsa: u8 = 3
 
 ## Signature algorithms: a hash with ECDSA, RSA PKCS#1 v1.5 or RSA-PSS (MGF1
-## with the same hash, salt as long as the hash).
+## with the same hash, salt as long as the hash). SHA-224 is accepted in
+## certificates; SHA-1 and MD5 signatures are not.
 pub let ecdsa_sha256: u8 = 1
 pub let ecdsa_sha384: u8 = 2
 pub let ecdsa_sha512: u8 = 3
@@ -23,6 +24,8 @@ pub let rsa_pkcs1_sha512: u8 = 6
 pub let rsa_pss_sha256: u8 = 7
 pub let rsa_pss_sha384: u8 = 8
 pub let rsa_pss_sha512: u8 = 9
+pub let ecdsa_sha224: u8 = 10
+pub let rsa_pkcs1_sha224: u8 = 11
 
 ## TLS signature schemes.
 pub let ecdsa_secp256r1_sha256: u16 = 0x0403
@@ -105,7 +108,15 @@ pub struct PublicKey:
         let modulus = crypto.equal(self.modulus[..<self.modulus_size], other.modulus[..<other.modulus_size])
         return point and modulus and crypto.equal(self.exponent[..<self.exponent_size], other.exponent[..<other.exponent_size])
 
+func is_ecdsa(algorithm: u8) -> bool:
+    return algorithm == ecdsa_sha224 or algorithm == ecdsa_sha256 or algorithm == ecdsa_sha384 or algorithm == ecdsa_sha512
+
+func is_pkcs1(algorithm: u8) -> bool:
+    return algorithm == rsa_pkcs1_sha224 or (algorithm >= rsa_pkcs1_sha256 and algorithm <= rsa_pkcs1_sha512)
+
 func hash_name(algorithm: u8) -> str:
+    if algorithm == ecdsa_sha224 or algorithm == rsa_pkcs1_sha224:
+        return "sha224"
     if algorithm == ecdsa_sha256 or algorithm == rsa_pkcs1_sha256 or algorithm == rsa_pss_sha256:
         return "sha256"
     if algorithm == ecdsa_sha384 or algorithm == rsa_pkcs1_sha384 or algorithm == rsa_pss_sha384:
@@ -115,11 +126,11 @@ func hash_name(algorithm: u8) -> str:
 ## Verify `signature` over `signed` with `key` under `algorithm`. False for a
 ## wrong signature or a key that cannot use the algorithm.
 pub func verify(key: const PublicKey*, algorithm: u8, signed: const u8[], signature: const u8[]) -> bool!:
-    if algorithm < ecdsa_sha256 or algorithm > rsa_pss_sha512:
+    if algorithm < ecdsa_sha256 or algorithm > rsa_pkcs1_sha224:
         return false
     var digest: u8[64]
     let size = try crypto.digest(signed, digest, hash_name(algorithm))
-    if algorithm <= ecdsa_sha512:
+    if is_ecdsa(algorithm):
         if key.kind == key_p256:
             var r: u8[32]
             var s: u8[32]
@@ -137,7 +148,7 @@ pub func verify(key: const PublicKey*, algorithm: u8, signed: const u8[], signat
         return false
     let modulus = key.modulus[..<key.modulus_size]
     let exponent = key.exponent[..<key.exponent_size]
-    if algorithm <= rsa_pkcs1_sha512:
+    if is_pkcs1(algorithm):
         return crypto.rsa_verify_pkcs1(modulus, exponent, hash_name(algorithm), digest[..<size], signature) catch: recover false
     return crypto.rsa_verify_pss(modulus, exponent, hash_name(algorithm), digest[..<size], signature, size) catch: recover false
 
