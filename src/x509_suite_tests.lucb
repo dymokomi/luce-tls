@@ -18,8 +18,9 @@ func certificate_message(directory: str, names: const u8[], out: u8[]) -> usize!
     var i: usize = 0
     while vectors.item(names, i).length != 0:
         var path: u8[1024]
-        let cert = try vectors.read(vectors.join(directory, vectors.item(names, i), path))
-        defer free(cert)
+        let file = try vectors.read(vectors.join(directory, vectors.item(names, i), path))
+        defer file.release()
+        let cert = file.value
         out[at] = (u8)(cert.length >> 16)
         out[at + 1] = (u8)((cert.length >> 8) & 0xff)
         out[at + 2] = (u8)(cert.length & 0xff)
@@ -123,10 +124,10 @@ func openssl(directory: str, counts: Counts*) -> !:
         while vectors.item(wanted, i).length != 0:
             var path: u8[1024]
             let cert = try vectors.read(vectors.join(directory, vectors.item(wanted, i), path))
-            trusted.add_certificate(cert) catch failure:
+            trusted.add_certificate(cert.value) catch failure:
                 discard(failure)
                 recover ()
-            free(cert)
+            cert.release()
             i += 1
         try counts.check(&cases, directory, &trusted)
 

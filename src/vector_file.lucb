@@ -2,12 +2,14 @@
 ## the converters in tools/). A line is space-separated fields; "-" is an empty
 ## field. Not exported by the package.
 import c
+import interop
 from luce_std import files
 import der
 
 ## A whole vector file and a cursor over its lines and fields.
 pub struct Lines:
-    var text: u8[]
+    var contents: interop.Owned[const u8[]]?
+    var text: const u8[]
     var line_start: usize
     var line_end: usize
     var next_start: usize
@@ -15,12 +17,14 @@ pub struct Lines:
     ## Load `directory`/`name`.
     pub static func open(directory: str, name: const u8[]) -> Lines!:
         var path: u8[1024]
-        return Lines(text = try read(join(directory, name, path)))
+        let contents = try read(join(directory, name, path))
+        return Lines(contents = contents, text = contents.value)
 
     ## Release the file contents.
     pub mutating func close():
-        if self.text.length > 0:
-            free(self.text)
+        if let contents = self.contents:
+            contents.release()
+        self.contents = none
         self.text = self.text[..<0]
 
     ## Advance to the next nonempty line; false at the end of the file.
@@ -79,8 +83,8 @@ pub struct Lines:
     pub func decode(index: usize, out: u8[]) -> usize!:
         return try decode_hex(try self.field(index), out)
 
-## Read a whole file; the caller frees the result.
-pub func read(path: str) -> u8[]!:
+## Read a whole file; the caller releases the result.
+pub func read(path: str) -> interop.Owned[const u8[]]!:
     var name: u8[1024]
     if path.length >= name.length:
         error(der.invalid, "vector path is too long")

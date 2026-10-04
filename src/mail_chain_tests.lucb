@@ -43,8 +43,9 @@ func load(directory: str, name: str, fixture: Fixture*) -> !:
         path[directory.length + 1 + i] = name.bytes[i]
     let path_size = directory.length + 1 + name.length
     path[path_size] = 0
-    let text = try files.read((c.str)(str)path[..<path_size])
-    defer free(text)
+    let file = try files.read((c.str)(str)path[..<path_size])
+    defer file.release()
+    let text = file.value
     var at: usize = 0
     var used: usize = 0
     while at < text.length:
