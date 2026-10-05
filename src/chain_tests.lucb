@@ -80,7 +80,7 @@ func make_message(message: u8[], leaf: const u8[], ye2: const u8[], root_ye: con
     return at
 
 func rejected(message: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> bool:
-    discard(chain.verify_server_chain(message, host, now, trusted) catch: return true)
+    _ = chain.verify_server_chain(message, host, now, trusted) catch: return true
     return false
 
 func find_bytes(haystack: const u8[], needle: const u8[]) -> usize!:
@@ -94,7 +94,7 @@ func find_bytes(haystack: const u8[], needle: const u8[]) -> usize!:
     error(chain.invalid, "fixture pattern is absent")
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     var leaf: u8[2048]
     var ye2: u8[2048]
     var root_ye: u8[2048]
@@ -113,7 +113,7 @@ pub func main(arguments: str[]) -> i32!:
     var y: u8[32]
     try key.p256_point(x, y)
     assert(x[0] == 0xbe and y[31] == 0xbb)
-    discard(try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window, &mozilla))
+    _ = try chain.verify_server_chain(message[..<full_n], "kinogaki.com", inside_window, &mozilla)
     assert(rejected(message[..<full_n], "pkg.luciaos.com", inside_window, &pinned))
     assert(rejected(message[..<full_n], "kinogaki.com", 1700000000, &pinned))
     assert(rejected(message[..<full_n], "kinogaki.com", 1800000000, &pinned))
@@ -124,7 +124,7 @@ pub func main(arguments: str[]) -> i32!:
     assert(rejected(message[..<full_n], "kinogaki.com", inside_window, &other))
     # The anchor may be omitted from a TLS path; Root YE is signed directly by it.
     let short_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], false)
-    discard(try chain.verify_server_chain(message[..<short_n], "kinogaki.com", inside_window, &pinned))
+    _ = try chain.verify_server_chain(message[..<short_n], "kinogaki.com", inside_window, &pinned)
     # Mutating an authenticated leaf signature must fail.
     leaf[leaf_n - 1] ^= 1
     let bad_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
@@ -132,9 +132,9 @@ pub func main(arguments: str[]) -> i32!:
     leaf[leaf_n - 1] ^= 1
     # Path building is order independent and ignores duplicates.
     let reordered_n = make_message(message, leaf[..<leaf_n], root_ye[..<root_ye_n], ye2[..<ye2_n], x2[..<x2_n], true)
-    discard(try chain.verify_server_chain(message[..<reordered_n], "kinogaki.com", inside_window, &pinned))
+    _ = try chain.verify_server_chain(message[..<reordered_n], "kinogaki.com", inside_window, &pinned)
     let duplicate_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], root_ye[..<root_ye_n], true)
-    discard(try chain.verify_server_chain(message[..<duplicate_n], "kinogaki.com", inside_window, &pinned))
+    _ = try chain.verify_server_chain(message[..<duplicate_n], "kinogaki.com", inside_window, &pinned)
     # Without Root YE there is no path to the anchor.
     let missing_n = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], ye2[..<ye2_n], x2[..<x2_n], true)
     assert(rejected(message[..<missing_n], "kinogaki.com", inside_window, &pinned))
@@ -146,7 +146,7 @@ pub func main(arguments: str[]) -> i32!:
     assert(rejected(message[..<critical_n], "kinogaki.com", inside_window, &pinned))
     leaf[key_usage_at + 4] ^= 1
     # Non-empty CertificateEntry extensions were not requested by this client.
-    discard(make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true))
+    _ = make_message(message, leaf[..<leaf_n], ye2[..<ye2_n], root_ye[..<root_ye_n], x2[..<x2_n], true)
     message[8 + leaf_n] = 1
     assert(rejected(message[..<full_n], "kinogaki.com", inside_window, &pinned))
     assert(rejected(message[..<full_n - 1], "kinogaki.com", inside_window, &pinned))

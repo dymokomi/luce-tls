@@ -52,7 +52,7 @@ pub struct PublicKey:
     var exponent_size: usize
 
     ## A P-256 key from 32-byte coordinates.
-    pub static func p256(x: const u8[], y: const u8[]) -> PublicKey!:
+    pub func p256(x: const u8[], y: const u8[]) -> PublicKey!:
         if x.length != 32 or y.length != 32:
             error(invalid, "P-256 coordinates must be 32 bytes")
         var key = PublicKey(kind = key_p256)
@@ -62,7 +62,7 @@ pub struct PublicKey:
         return key
 
     ## A P-384 key from 48-byte coordinates.
-    pub static func p384(x: const u8[], y: const u8[]) -> PublicKey!:
+    pub func p384(x: const u8[], y: const u8[]) -> PublicKey!:
         if x.length != 48 or y.length != 48:
             error(invalid, "P-384 coordinates must be 48 bytes")
         var key = PublicKey(kind = key_p384)
@@ -72,7 +72,7 @@ pub struct PublicKey:
         return key
 
     ## An RSA key from big-endian modulus and exponent bytes (2048–8192 bits).
-    pub static func rsa(modulus: const u8[], exponent: const u8[]) -> PublicKey!:
+    pub func rsa(modulus: const u8[], exponent: const u8[]) -> PublicKey!:
         var key = PublicKey(kind = key_rsa)
         var start: usize = 0
         while start < modulus.length and modulus[start] == 0:

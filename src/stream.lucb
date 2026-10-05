@@ -32,7 +32,7 @@ pub struct Stream: io.Reader, io.Writer:
     ## set, handshake under `policy` (default: the public roots). `alpn`, when
     ## not empty, is the one application protocol offered. `deadline` and
     ## `cancellation` bound the whole connect and stay set for later transfers.
-    pub static func connect(host: str, port: u16, tls: bool, deadline: net.Deadline = net.Deadline(),
+    pub func connect(host: str, port: u16, tls: bool, deadline: net.Deadline = net.Deadline(),
         cancellation: sync.Cancellation*? = none, policy: Trust = Trust(), alpn: str = "") -> Stream!:
         var host_c: u8[256]
         if host.length == 0 or host.length + 1 > host_c.length:
@@ -60,14 +60,14 @@ pub struct Stream: io.Reader, io.Writer:
 
     ## Adopt a connected socket as a plain stream. It is made nonblocking on
     ## first use. The stream owns and closes it.
-    pub static func plain(connection: net.Connection) -> Stream:
+    pub func plain(connection: net.Connection) -> Stream:
         return Stream(connection = connection)
 
     ## STARTTLS: run the TLS client handshake on this plain connection under
     ## the stream's deadline. Discard any plaintext buffered after the server's
     ## STARTTLS reply first (RFC 3207 §4.2, RFC 2595 §3.1). After a failure the
     ## stream is unusable and should be closed.
-    pub mutating func start_tls(host: str, policy: Trust = Trust(), alpn: str = "") -> !:
+    pub func start_tls(host: str, policy: Trust = Trust(), alpn: str = "") -> !:
         if self.secure:
             error(invalid, "the stream already uses TLS")
         var link = try self.link()
@@ -85,7 +85,7 @@ pub struct Stream: io.Reader, io.Writer:
 
     ## Apply an absolute `deadline` and optional `cancellation` to subsequent
     ## reads, writes and close. `net.Deadline()` removes the time limit.
-    pub mutating func set_deadline(deadline: net.Deadline, cancellation: sync.Cancellation*? = none):
+    pub func set_deadline(deadline: net.Deadline, cancellation: sync.Cancellation*? = none):
         self.deadline = deadline
         self.cancellation = cancellation
 
@@ -102,11 +102,11 @@ pub struct Stream: io.Reader, io.Writer:
     ## is the end of the stream (TCP EOF, or close_notify when secure). A
     ## timeout (`net.timed_out`) or cancellation (`net.cancelled`) leaves the
     ## stream usable.
-    pub mutating func read(buffer: u8[]) -> usize!:
+    pub func read(buffer: u8[]) -> usize!:
         return try self.read_within(buffer, self.deadline, self.cancellation)
 
     ## `read` with an explicit absolute deadline and cancellation for this call.
-    pub mutating func read_within(buffer: u8[], deadline: net.Deadline, cancellation: sync.Cancellation*? = none) -> usize!:
+    pub func read_within(buffer: u8[], deadline: net.Deadline, cancellation: sync.Cancellation*? = none) -> usize!:
         if buffer.length == 0:
             return 0
         var link = try self.link_with(deadline, cancellation)
@@ -116,12 +116,12 @@ pub struct Stream: io.Reader, io.Writer:
 
     ## Send all of `data` under the stream's deadline and return its length.
     ## When secure, a failure part way leaves the TLS session unusable.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         try self.write_within(data, self.deadline, self.cancellation)
         return data.length
 
     ## Send all of `data` with an explicit absolute deadline and cancellation.
-    pub mutating func write_within(data: const u8[], deadline: net.Deadline, cancellation: sync.Cancellation*? = none) -> !:
+    pub func write_within(data: const u8[], deadline: net.Deadline, cancellation: sync.Cancellation*? = none) -> !:
         if data.length == 0:
             return
         var link = try self.link_with(deadline, cancellation)
@@ -151,30 +151,30 @@ pub struct Stream: io.Reader, io.Writer:
 
     ## Send close_notify when secure (best effort, under the stream's
     ## deadline), close the socket and erase the session keys. Safe to repeat.
-    pub mutating func close() -> !:
+    pub func close() -> !:
         if self.connection.descriptor() == none:
             return
         if self.secure and self.channel.established():
-            discard(self.send_close_notify() catch: recover ())
+            _ = self.send_close_notify() catch: recover ()
         self.channel.wipe()
         self.secure = false
         try self.connection.close()
 
     ## Close without close_notify, ignoring errors; for unwinding.
-    pub mutating func destroy():
+    pub func destroy():
         self.channel.wipe()
         self.secure = false
         self.connection.destroy()
 
-    mutating func send_close_notify() -> !:
+    func send_close_notify() -> !:
         var link = try self.link()
         try self.channel.send_alert(&link, 1, 0)
 
-    mutating func link() -> net.DeadlineStream!:
+    func link() -> net.DeadlineStream!:
         return try self.link_with(self.deadline, self.cancellation)
 
     ## A deadline view of the socket, switching it to nonblocking on first use.
-    mutating func link_with(deadline: net.Deadline, cancellation: sync.Cancellation*?) -> net.DeadlineStream!:
+    func link_with(deadline: net.Deadline, cancellation: sync.Cancellation*?) -> net.DeadlineStream!:
         if not self.prepared:
             try self.connection.set_nonblocking(true)
             self.prepared = true

@@ -35,7 +35,7 @@ func test_self_signed() -> !:
     assert(try cert.signed_by(der[..<n], &key))
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     try test_openrouter()
     try test_self_signed()
     print("PASS X.509 parsing of a public P-256 leaf and minted self-signed certificates")

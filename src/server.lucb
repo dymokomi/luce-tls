@@ -240,7 +240,7 @@ func build_flight(out: u8[], schedule: hs.Schedule*, der: const u8[], d: const u
     var content: u8[160]
     let content_size = hs.verify_content(true, transcript_hash[..<hash_size], content)
     var digest: u8[32]
-    discard(try crypto.digest(content[..<content_size], digest, "sha256"))
+    _ = try crypto.digest(content[..<content_size], digest, "sha256")
     var r: u8[32]
     var s: u8[32]
     try crypto.ecdsa_p256_sign(d, digest, r, s)

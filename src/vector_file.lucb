@@ -15,20 +15,20 @@ pub struct Lines:
     var next_start: usize
 
     ## Load `directory`/`name`.
-    pub static func open(directory: str, name: const u8[]) -> Lines!:
+    pub func open(directory: str, name: const u8[]) -> Lines!:
         var path: u8[1024]
         let contents = try read(join(directory, name, path))
         return Lines(contents = contents, text = contents.value)
 
     ## Release the file contents.
-    pub mutating func close():
+    pub func close():
         if let contents = self.contents:
             contents.release()
         self.contents = none
         self.text = self.text[..<0]
 
     ## Advance to the next nonempty line; false at the end of the file.
-    pub mutating func next() -> bool:
+    pub func next() -> bool:
         while self.next_start < self.text.length:
             self.line_start = self.next_start
             var end = self.line_start
@@ -41,11 +41,11 @@ pub struct Lines:
         return false
 
     ## Return to the start of the file.
-    pub mutating func rewind():
+    pub func rewind():
         self.next_start = 0
 
     ## Move to the first line whose first field is `name`; false if none.
-    pub mutating func seek(name: const u8[]) -> bool!:
+    pub func seek(name: const u8[]) -> bool!:
         self.rewind()
         while self.next():
             if der.same(try self.field(0), name):
@@ -53,7 +53,7 @@ pub struct Lines:
         return false
 
     ## Move to the first line whose first field is `name`; fails if none.
-    pub mutating func find(name: const u8[]) -> !:
+    pub func find(name: const u8[]) -> !:
         if not try self.seek(name):
             print(f"missing vector {(str)name}")
             error(der.invalid, "vector not found")

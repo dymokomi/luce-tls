@@ -80,7 +80,7 @@ func serve_starttls(conn: net.Connection*) -> !:
     try channel.write_application(conn, buffer[..<n])
 
 func server_main(raw: void*?):
-    discard(raw)
+    _ = raw
     let bind_addr = net.resolve((c.str)"localhost", 0) catch failure:
         return
     var listener = net.Listener.bind(bind_addr) catch failure:
@@ -94,22 +94,22 @@ func server_main(raw: void*?):
     serve(&conn) catch failure:
         print(f"server: {failure.message}")
         return
-    discard(conn.close() catch: recover ())
+    _ = conn.close() catch: recover ()
     var plain = listener.accept() catch failure:
         return
     serve_starttls(&plain) catch failure:
         print(f"starttls server: {failure.message}")
         return
-    discard(plain.close() catch: recover ())
+    _ = plain.close() catch: recover ()
     g_result.store(1, .release)
     # The third client pins the wrong key; its handshake must fail.
     var rejected = listener.accept() catch failure:
         return
     var channel = record.Channel()
     server.accept(&channel, &rejected, &rejected, g_cert[..<g_cert_n], g_d) catch failure:
-        discard(failure)
+        _ = failure
         recover ()
-    discard(rejected.close() catch: recover ())
+    _ = rejected.close() catch: recover ()
 
 func expect_text(actual: const u8[], expected: const u8[]):
     assert(actual.length == expected.length)
@@ -142,19 +142,19 @@ func implicit_tls(port: u16, pinned: tls_stream.Trust) -> !:
     stream.set_deadline(try net.Deadline.after(50000000))
     var late: u8[4]
     var timed_out = false
-    discard(stream.read(late) catch failure:
+    _ = stream.read(late) catch failure:
         assert(failure.code == net.timed_out)
         timed_out = true
-        recover 0)
+        recover 0
     assert(timed_out)
     stream.set_deadline(net.Deadline())
     # Another thread cancels a read that would block indefinitely.
     g_step.store(1, .release)
     var cancelled = false
-    discard(stream.read_within(late, net.Deadline(), &g_cancel) catch failure:
+    _ = stream.read_within(late, net.Deadline(), &g_cancel) catch failure:
         assert(failure.code == net.cancelled)
         cancelled = true
-        recover 0)
+        recover 0
     assert(cancelled)
     g_step.store(2, .release)
     try io.read_exact(&stream, late)
@@ -182,12 +182,12 @@ func starttls(port: u16, pinned: tls_stream.Trust) -> !:
     try stream.close()
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
     g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
     var worker = try thread.spawn(server_main, none, name = "tls-stream-server")
     defer worker.join() catch failure:
-        discard(failure)
+        _ = failure
     wait_for(&g_ready, 1)
     assert(g_ready.load(.acquire) == 1)
     let port = (u16)g_port.load(.acquire)
@@ -200,7 +200,7 @@ pub func main(arguments: str[]) -> i32!:
     let wrong = try tls_stream.Trust.pinned_issuer(g_qy, g_qx)
     var refused = false
     var bad = tls_stream.Stream.connect("localhost", port, true, policy = wrong) catch failure:
-        discard(failure)
+        _ = failure
         refused = true
         recover tls_stream.Stream()
     assert(refused)

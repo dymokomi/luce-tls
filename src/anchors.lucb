@@ -25,19 +25,19 @@ pub struct Anchors:
     var named: usize
 
     ## The Mozilla roots trusted for TLS server authentication.
-    pub static func mozilla() -> Anchors:
+    pub func mozilla() -> Anchors:
         return Anchors(kind = kind_bundled)
 
     ## A single explicit key, for private servers or pinned public roots.
-    pub static func single(key: signature.PublicKey) -> Anchors:
+    pub func single(key: signature.PublicKey) -> Anchors:
         return Anchors(kind = kind_single, key = key)
 
     ## An empty list of named anchors; fill it with `add` or `add_certificate`.
-    pub static func named_list() -> Anchors:
+    pub func named_list() -> Anchors:
         return Anchors(kind = kind_named)
 
     ## Add an anchor with this subject Name (DER) and key.
-    pub mutating func add(subject: const u8[], key: signature.PublicKey) -> !:
+    pub func add(subject: const u8[], key: signature.PublicKey) -> !:
         let start = 0 if self.named == 0 else self.name_end[self.named - 1]
         if self.kind != kind_named or self.named == max_named or subject.length > self.names.length - start:
             error(invalid, "too many or too large named trust anchors")
@@ -49,7 +49,7 @@ pub struct Anchors:
 
     ## Add the subject Name and key of a (root) certificate as an anchor. Only
     ## the Name and key are used, as RFC 5280 trust anchors are.
-    pub mutating func add_certificate(der: const u8[]) -> !:
+    pub func add_certificate(der: const u8[]) -> !:
         let cert = try certificate.parse(der)
         try self.add(cert.subject(der), try cert.public_key(der))
 

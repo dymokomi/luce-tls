@@ -40,11 +40,11 @@ pub struct Messages:
     var start: usize
 
     ## Allocate the bounded reassembly buffer.
-    pub static func create() -> Messages!:
+    pub func create() -> Messages!:
         return Messages(data = try new u8[message_capacity] in memory.heap)
 
     ## Release the buffer; safe to repeat.
-    pub mutating func close():
+    pub func close():
         if self.data.length != 0:
             crypto.wipe(self.data)
             free(self.data) in memory.heap
@@ -56,7 +56,7 @@ pub struct Messages:
 
     ## The next complete message: type, 24-bit length and body. The view is
     ## valid until the following call.
-    pub mutating func next(channel: record.Channel*, source: io.Reader) -> const u8[]!:
+    pub func next(channel: record.Channel*, source: io.Reader) -> const u8[]!:
         if self.start > 0:
             let left = self.used - self.start
             for i in 0..<left:
@@ -98,20 +98,20 @@ pub struct Schedule:
     var server_handshake: u8[48]
 
     ## Begin a schedule with no PSK: early secret = HKDF-Extract(0, 0).
-    pub static func start(suite: record.Suite) -> Schedule!:
+    pub func start(suite: record.Suite) -> Schedule!:
         var schedule = Schedule(algorithm = suite.hash, size = suite.hash_size, transcript = try crypto.make_hash(suite.hash))
         var zeros: u8[48]
-        discard(try crypto.hkdf_extract(zeros[..<suite.hash_size], zeros[..<suite.hash_size], schedule.secret, suite.hash))
+        _ = try crypto.hkdf_extract(zeros[..<suite.hash_size], zeros[..<suite.hash_size], schedule.secret, suite.hash)
         return schedule
 
     ## Add a whole handshake message to the transcript.
-    pub mutating func add(message: const u8[]) -> !:
+    pub func add(message: const u8[]) -> !:
         try self.transcript.update(message)
 
     ## Replace ClientHello1 by its message_hash after a HelloRetryRequest (§4.4.1).
-    pub mutating func add_retry_hash(first_hello: const u8[]) -> !:
+    pub func add_retry_hash(first_hello: const u8[]) -> !:
         var digest: u8[48]
-        discard(try crypto.digest(first_hello, digest, self.algorithm))
+        _ = try crypto.digest(first_hello, digest, self.algorithm)
         var synthetic: u8[52]
         synthetic[0] = message_hash
         synthetic[3] = (u8)self.size
@@ -124,19 +124,19 @@ pub struct Schedule:
         return try self.transcript.digest(out)
 
     ## Derive-Secret(secret, "derived", "") followed by HKDF-Extract with `input`.
-    mutating func advance(input: const u8[]) -> !:
+    func advance(input: const u8[]) -> !:
         var empty: u8[48]
-        discard(try crypto.digest(b"", empty, self.algorithm))
+        _ = try crypto.digest(b"", empty, self.algorithm)
         var derived: u8[48]
         defer crypto.wipe(derived)
         try tls.expand_label(self.secret[..<self.size], b"derived", empty[..<self.size], derived[..<self.size], self.algorithm)
-        discard(try crypto.hkdf_extract(input, derived[..<self.size], self.secret, self.algorithm))
+        _ = try crypto.hkdf_extract(input, derived[..<self.size], self.secret, self.algorithm)
 
     ## After ServerHello: mix the (EC)DHE secret and derive both handshake secrets.
-    pub mutating func enter_handshake(shared: const u8[]) -> !:
+    pub func enter_handshake(shared: const u8[]) -> !:
         try self.advance(shared)
         var transcript_hash: u8[48]
-        discard(try self.current(transcript_hash))
+        _ = try self.current(transcript_hash)
         try tls.expand_label(self.secret[..<self.size], b"c hs traffic", transcript_hash[..<self.size], self.client_handshake[..<self.size], self.algorithm)
         try tls.expand_label(self.secret[..<self.size], b"s hs traffic", transcript_hash[..<self.size], self.server_handshake[..<self.size], self.algorithm)
 
@@ -147,11 +147,11 @@ pub struct Schedule:
         return self.server_handshake[..<self.size]
 
     ## After server Finished: derive both application traffic secrets.
-    pub mutating func enter_application(client_out: u8[], server_out: u8[]) -> !:
+    pub func enter_application(client_out: u8[], server_out: u8[]) -> !:
         var zeros: u8[48]
         try self.advance(zeros[..<self.size])
         var transcript_hash: u8[48]
-        discard(try self.current(transcript_hash))
+        _ = try self.current(transcript_hash)
         try tls.expand_label(self.secret[..<self.size], b"c ap traffic", transcript_hash[..<self.size], client_out[..<self.size], self.algorithm)
         try tls.expand_label(self.secret[..<self.size], b"s ap traffic", transcript_hash[..<self.size], server_out[..<self.size], self.algorithm)
 
@@ -161,11 +161,11 @@ pub struct Schedule:
         defer crypto.wipe(key)
         try tls.expand_label(base, b"finished", b"", key[..<self.size], self.algorithm)
         var transcript_hash: u8[48]
-        discard(try self.current(transcript_hash))
-        discard(try crypto.authenticate(key[..<self.size], transcript_hash[..<self.size], out, self.algorithm))
+        _ = try self.current(transcript_hash)
+        _ = try crypto.authenticate(key[..<self.size], transcript_hash[..<self.size], out, self.algorithm)
 
     ## Erase secrets and the transcript of this exact object.
-    pub mutating func wipe():
+    pub func wipe():
         self.transcript.close()
         crypto.wipe(self.secret)
         crypto.wipe(self.client_handshake)
@@ -204,35 +204,35 @@ pub struct Builder:
     var at: usize
 
     ## A builder over `data`.
-    pub static func over(data: u8[]) -> Builder:
+    pub func over(data: u8[]) -> Builder:
         return Builder(data = data, at = 0)
 
     ## Bytes written so far.
     pub func size() -> usize:
         return self.at
 
-    pub mutating func put8(value: u8):
+    pub func put8(value: u8):
         self.data[self.at] = value
         self.at += 1
 
-    pub mutating func put16(value: usize):
+    pub func put16(value: usize):
         self.put8((u8)(value >> 8))
         self.put8((u8)value)
 
-    pub mutating func put(value: const u8[]):
+    pub func put(value: const u8[]):
         for i in 0..<value.length:
             self.data[self.at + i] = value[i]
         self.at += value.length
 
     ## Reserve a length prefix of `width` bytes; returns its position for `close`.
-    pub mutating func open(width: usize) -> usize:
+    pub func open(width: usize) -> usize:
         let mark = self.at
         for _ in 0..<width:
             self.put8(0)
         return mark
 
     ## Fill a reserved `width`-byte prefix with the length written after it.
-    pub mutating func close(mark: usize, width: usize):
+    pub func close(mark: usize, width: usize):
         let length = self.at - mark - width
         for i in 0..<width:
             self.data[mark + i] = (u8)(length >> (8 * (width - 1 - i)))
@@ -246,7 +246,7 @@ pub struct KeyShare:
 
     ## A fresh key pair for `group` (x25519, or secp256r1 as an uncompressed
     ## point; its scalar multiplication is variable-time, see luce-crypto).
-    pub static func generate(group: u16) -> KeyShare!:
+    pub func generate(group: u16) -> KeyShare!:
         var share = KeyShare(group = group)
         if group == group_x25519:
             try os.random_bytes(share.secret)
@@ -289,5 +289,5 @@ pub struct KeyShare:
         error(invalid, "unsupported TLS key-exchange group")
 
     ## Erase the private key of this exact object.
-    pub mutating func wipe():
+    pub func wipe():
         crypto.wipe(self.secret)

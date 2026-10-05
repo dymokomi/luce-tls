@@ -24,12 +24,12 @@ struct Trace:
     var records: usize
 
     ## Decode item `name` into `out`; returns its length.
-    mutating func get(name: const u8[], out: u8[]) -> usize!:
+    func get(name: const u8[], out: u8[]) -> usize!:
         try self.lines.find(name)
         return try self.lines.decode(1, out)
 
     ## Fail unless `value` equals item `name`.
-    mutating func expect(name: const u8[], value: const u8[]) -> !:
+    func expect(name: const u8[], value: const u8[]) -> !:
         var wanted: u8[8192]
         let size = try self.get(name, wanted)
         if not der.same(wanted[..<size], value):
@@ -103,9 +103,9 @@ func hkdf_steps(trace: Trace*, walk: vectors.Lines*) -> usize!:
 ## Both x25519 key pairs and the shared secret from each side.
 func key_exchange(trace: Trace*) -> !:
     var client_private: u8[32]
-    discard(try trace.get(b"client.create_an_ephemeral_x25519_key_pair.1.private_key", client_private))
+    _ = try trace.get(b"client.create_an_ephemeral_x25519_key_pair.1.private_key", client_private)
     var server_private: u8[32]
-    discard(try trace.get(b"server.create_an_ephemeral_x25519_key_pair.1.private_key", server_private))
+    _ = try trace.get(b"server.create_an_ephemeral_x25519_key_pair.1.private_key", server_private)
     var client_public: u8[32]
     try crypto.x25519_base(client_public, client_private)
     try trace.expect(b"client.create_an_ephemeral_x25519_key_pair.1.public_key", client_public)
@@ -165,7 +165,7 @@ func add_message(trace: Trace*, connection: Connection*, name: const u8[], out: 
 
 ## Whether the client refuses this certificate.
 func refused(bytes: const u8[]) -> bool:
-    discard(certificate.parse(bytes) catch: return true)
+    _ = certificate.parse(bytes) catch: return true
     return false
 
 ## ClientHello and ServerHello in the clear, then the handshake secrets.
@@ -181,7 +181,7 @@ func hello(trace: Trace*, connection: Connection*) -> !:
     let hash_size = try connection.schedule.current(transcript_hash)
     try trace.expect(b"server.derive_secret_tls13_c_hs_traffic.1.hash", transcript_hash[..<hash_size])
     var shared: u8[32]
-    discard(try trace.get(b"server.extract_secret_handshake.1.ikm", shared))
+    _ = try trace.get(b"server.extract_secret_handshake.1.ikm", shared)
     try connection.schedule.enter_handshake(shared)
     try trace.expect(b"server.derive_secret_tls13_c_hs_traffic.1.expanded", connection.schedule.handshake_secret(true))
     try trace.expect(b"server.derive_secret_tls13_s_hs_traffic.1.expanded", connection.schedule.handshake_secret(false))
@@ -194,7 +194,7 @@ func server_flight(trace: Trace*, connection: Connection*) -> !:
     try connection.client.protect_read(connection.suite, secret)
     try transfer(trace, b"server.send_handshake_record.2", record.handshake, &connection.server, &connection.client)
     var message: u8[1024]
-    discard(try add_message(trace, connection, b"server.construct_an_encryptedextensions_handshake_message.1.encryptedextensions", message))
+    _ = try add_message(trace, connection, b"server.construct_an_encryptedextensions_handshake_message.1.encryptedextensions", message)
     let size = try add_message(trace, connection, b"server.construct_a_certificate_handshake_message.1.certificate", message)
     # One entry: type, length, empty context, list length, then the certificate.
     let cert_size = ((usize)message[8] << 16) | ((usize)message[9] << 8) | (usize)message[10]

@@ -5,7 +5,7 @@ func nibble(c: u8) -> u8:
     return c - 'a' + 10
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     var header: u8[5]
     header[0] = 22
     header[1] = 3

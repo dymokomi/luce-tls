@@ -375,7 +375,7 @@ func client_flight(channel: record.Channel*, sink: io.Writer, schedule: hs.Sched
         let body = b.open(3)
         b.put8((u8)hello.request_context_size)
         b.put(hello.request_context[..<hello.request_context_size])
-        discard(b.open(3))
+        _ = b.open(3)
         b.close(body, 3)
         try schedule.add(empty[..<b.size()])
         try channel.send(sink, record.handshake, empty[..<b.size()])

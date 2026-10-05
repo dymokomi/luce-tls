@@ -168,7 +168,7 @@ pub func mint_self_signed(host: str, d: const u8[], qx: const u8[], qy: const u8
     var tbs_seq_n: usize = 0
     try der_tlv(tbs, &tbs_seq_n, 0x30, tbs_body[..<tbs_n], tbs_n)
     var digest: u8[32]
-    discard(try crypto_native.digest(tbs[..<tbs_seq_n], digest, "sha256"))
+    _ = try crypto_native.digest(tbs[..<tbs_seq_n], digest, "sha256")
     var r: u8[32]
     var s: u8[32]
     try crypto_native.ecdsa_p256_sign(d, digest, r, s)

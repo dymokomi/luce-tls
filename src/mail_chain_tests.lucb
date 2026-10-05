@@ -95,7 +95,7 @@ func message(fixture: const Fixture*, order: const usize[], out: u8[]) -> usize:
     return at
 
 func accepted(bytes: const u8[], host: str, now: i64, trusted: const anchors.Anchors*) -> bool:
-    discard(chain.verify_server_chain(bytes, host, now, trusted) catch: return false)
+    _ = chain.verify_server_chain(bytes, host, now, trusted) catch: return false
     return true
 
 func check(fixture: Fixture*) -> !:

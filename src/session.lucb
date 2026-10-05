@@ -67,9 +67,9 @@ pub func upgrade_client(conn: net.Connection*, host: str, policy: const Trust*, 
 ## Server handshake for private endpoints: certificate `cert` with P-256 private
 ## key `d`. `host`, `qx` and `qy` are accepted for compatibility and unused.
 pub func accept(conn: net.Connection*, host: str, cert: const u8[], d: const u8[], qx: const u8[], qy: const u8[], secrets: Secrets*) -> !:
-    discard(host)
-    discard(qx)
-    discard(qy)
+    _ = host
+    _ = qx
+    _ = qy
     try server.accept(secrets, conn, conn, cert, d)
 
 ## Send application data, fragmenting into records of at most 2^14 bytes.

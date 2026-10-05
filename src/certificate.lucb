@@ -185,7 +185,7 @@ func parse_spki(bytes: const u8[], spki: der.Element, cert: Certificate*) -> !:
         cert.key_a_end = modulus.end()
         cert.key_b_start = exponent.end() - e.length
         cert.key_b_end = exponent.end()
-        discard(try cert.public_key(bytes))
+        _ = try cert.public_key(bytes)
         return
     if not der.oid_is(bytes, oid, oid_ec_public):
         error(invalid, "unsupported certificate public key algorithm")

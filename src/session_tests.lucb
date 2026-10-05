@@ -17,7 +17,7 @@ var g_ready: @u64
 var g_ok: @u64
 
 func server_main(raw: void*?):
-    discard(raw)
+    _ = raw
     let bind_addr = net.resolve((c.str)"localhost", 0) catch failure:
         return
     let listener = net.Listener.bind(bind_addr) catch failure:
@@ -46,26 +46,26 @@ func server_main(raw: void*?):
     let short_hello = b"\x16\x03\x03\x00\x01\x02"
     io.write_all(&malformed, short_hello) catch failure:
         return
-    discard(malformed.close() catch: recover ())
+    _ = malformed.close() catch: recover ()
     g_ok.store(2, .release)
 
 func malformed_server_rejected(port: u16) -> bool:
     var secrets = tls.Secrets()
     var conn = tls.connect("localhost", port, g_qx, g_qy, &secrets) catch failure:
-        discard(failure)
+        _ = failure
         return true
-    discard(conn.close() catch: recover ())
+    _ = conn.close() catch: recover ()
     return false
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
     g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
     g_ready.store(0, .relaxed)
     g_ok.store(0, .relaxed)
     var worker = try thread.spawn(server_main, none, name = "tls-server")
     defer worker.join() catch failure:
-        discard(failure)
+        _ = failure
     var i: usize = 0
     while g_ready.load(.acquire) == 0 and i < 200:
         thread.sleep(10)

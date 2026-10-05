@@ -18,12 +18,12 @@ pub struct Trust:
     var y: u8[48]
 
     ## Public servers: a path to one of the bundled Mozilla roots.
-    pub static func public_roots() -> Trust:
+    pub func public_roots() -> Trust:
         return Trust(kind = kind_public)
 
     ## A private server whose chain ends at this P-256 key: typically a leaf
     ## signed by it or self-signed with it, as `x509.mint_self_signed` makes.
-    pub static func pinned_issuer(x: const u8[], y: const u8[]) -> Trust!:
+    pub func pinned_issuer(x: const u8[], y: const u8[]) -> Trust!:
         if x.length != 32 or y.length != 32:
             error(invalid, "pinned P-256 issuer coordinates must be 32 bytes")
         var trust = Trust(kind = kind_issuer)
@@ -33,7 +33,7 @@ pub struct Trust:
         return trust
 
     ## A chain that ends at this explicit P-384 root key.
-    pub static func p384_root(x: const u8[], y: const u8[]) -> Trust!:
+    pub func p384_root(x: const u8[], y: const u8[]) -> Trust!:
         if x.length != 48 or y.length != 48:
             error(invalid, "P-384 root coordinates must be 48 bytes")
         var trust = Trust(kind = kind_p384_root)

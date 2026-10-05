@@ -43,9 +43,9 @@ func certificate_message(directory: str, names: const u8[], out: u8[]) -> usize!
 ## Whether the chain validates; an empty host checks no name.
 func accepted(message: const u8[], host: const u8[], now: i64, trusted: const anchors.Anchors*) -> bool:
     if host.length == 0:
-        discard(chain.verify_chain_without_name(message, now, trusted) catch: return false)
+        _ = chain.verify_chain_without_name(message, now, trusted) catch: return false
     else:
-        discard(chain.verify_server_chain(message, (str)host, now, trusted) catch: return false)
+        _ = chain.verify_server_chain(message, (str)host, now, trusted) catch: return false
     return true
 
 struct Counts:
@@ -55,7 +55,7 @@ struct Counts:
 
     ## Validate the case on the current line of `cases` (fields: case NAME
     ## EXPECT TIME HOST ANCHORS CHAIN) and fail when the verdict differs.
-    mutating func check(cases: const vectors.Lines*, directory: str, trusted: const anchors.Anchors*) -> !:
+    func check(cases: const vectors.Lines*, directory: str, trusted: const anchors.Anchors*) -> !:
         var message: u8[65536]
         let size = try certificate_message(directory, try cases.field(6), message)
         let verdict = accepted(message[..<size], try cases.field(4), vectors.decimal(try cases.field(3)), trusted)
@@ -125,7 +125,7 @@ func openssl(directory: str, counts: Counts*) -> !:
             var path: u8[1024]
             let cert = try vectors.read(vectors.join(directory, vectors.item(wanted, i), path))
             trusted.add_certificate(cert.value) catch failure:
-                discard(failure)
+                _ = failure
                 recover ()
             cert.release()
             i += 1

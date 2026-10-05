@@ -27,7 +27,7 @@ let case_groups: u16[6] = [0, 0, 0, 0x0017, 0x0017, 0x0017]
 
 func serve_one(listener: net.Listener*, index: usize) -> !:
     var conn = try listener.accept()
-    defer discard(conn.close() catch: recover ())
+    defer _ = conn.close() catch: recover ()
     var channel = record.Channel()
     try server.accept(&channel, &conn, &conn, g_cert[..<g_cert_n], g_d, case_groups[index], false, case_suites[index])
     var buffer: u8[16]
@@ -40,7 +40,7 @@ func serve_one(listener: net.Listener*, index: usize) -> !:
     try channel.write_application(&conn, buffer[..<m])
 
 func server_main(raw: void*?):
-    discard(raw)
+    _ = raw
     let bind_addr = net.resolve((c.str)"localhost", 0) catch failure:
         return
     var listener = net.Listener.bind(bind_addr) catch failure:
@@ -56,12 +56,12 @@ func server_main(raw: void*?):
         g_served.store((u64)(i + 1), .release)
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
     g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
     var worker = try thread.spawn(server_main, none, name = "tls-handshake-server")
     defer worker.join() catch failure:
-        discard(failure)
+        _ = failure
     var i: usize = 0
     while g_ready.load(.acquire) == 0 and i < 500:
         thread.sleep(10)
@@ -71,7 +71,7 @@ pub func main(arguments: str[]) -> i32!:
     for index in 0..<case_suites.length:
         var stream = try tls_stream.Stream.connect("localhost", port, true, policy = pinned)
         assert(stream.cipher_suite() == case_suites[index], "unexpected cipher suite")
-        discard(try stream.write(b"ping"))
+        _ = try stream.write(b"ping")
         var reply: u8[4]
         var got: usize = 0
         while got < 4:
@@ -81,7 +81,7 @@ pub func main(arguments: str[]) -> i32!:
         assert(reply[0] == 'p' and reply[1] == 'i' and reply[3] == 'g')
         try io.read_exact(&stream, reply)
         assert(reply[0] == 'n' and reply[3] == 't')
-        discard(try stream.write(b"more"))
+        _ = try stream.write(b"more")
         try io.read_exact(&stream, reply)
         assert(reply[0] == 'm' and reply[3] == 'e')
         try stream.close()

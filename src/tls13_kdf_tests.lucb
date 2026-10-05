@@ -22,9 +22,9 @@ func extract(lines: const vectors.Lines*, algorithm: str, size: usize, out: u8[]
         var label: u8[64]
         let label_size = try lines.decode(4, label)
         var empty_hash: u8[64]
-        discard(try crypto.digest(b"", empty_hash, algorithm))
+        _ = try crypto.digest(b"", empty_hash, algorithm)
         try tls.expand_label(salt[..<salt_size], label[..<label_size], empty_hash[..<size], derived[..<size], algorithm)
-    discard(try crypto.hkdf_extract(key[..<key_size], derived[..<size], out, algorithm))
+    _ = try crypto.hkdf_extract(key[..<key_size], derived[..<size], out, algorithm)
 
 ## HKDF-Expand-Label of the current line into `out`.
 func expand(lines: const vectors.Lines*, algorithm: str, out: u8[]) -> !:
