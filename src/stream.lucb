@@ -4,13 +4,21 @@
 ## every transfer waits through readiness like `net.DeadlineStream`, under the
 ## stream's deadline and cancellation signal, so another thread can cancel a
 ## blocked read (an IMAP IDLE) and a timed-out TLS read resumes intact.
+##
+## In nonblocking mode (`set_nonblocking`) nothing waits, for an event loop that
+## watches the descriptor: a transfer that cannot progress fails with
+## io.would_block, the TLS handshake advances step by step (`begin_tls`,
+## `continue_tls`), and records the socket cannot take yet wait in the stream's
+## outgoing queue until `flush` sends them.
 import io
 from luce_std import net
 import c
 import sync
+import memory
 import platform
 import record
 import client
+import server
 import trust
 
 pub let invalid = record.invalid
@@ -27,6 +35,13 @@ pub struct Stream: io.Reader, io.Writer:
     var prepared: bool
     var deadline: net.Deadline
     var cancellation: sync.Cancellation*?
+    ## Nonblocking mode: no transfer waits.
+    var nonblocking: bool
+    ## TLS records written but not yet sent (nonblocking mode).
+    var outbox: Outbox
+    ## The client handshake `begin_tls` started, until it completes (nonblocking
+    ## mode): one element in the C heap, empty otherwise.
+    var handshake: client.Handshake[]
 
     ## Resolve `host`, try each address in resolver order, and, when `tls` is
     ## set, handshake under `policy` (default: the public roots). `alpn`, when
@@ -109,14 +124,35 @@ pub struct Stream: io.Reader, io.Writer:
     pub func read_within(buffer: u8[], deadline: net.Deadline, cancellation: sync.Cancellation*? = none) -> usize!:
         if buffer.length == 0:
             return 0
+        if self.nonblocking:
+            if self.handshake.length > 0:
+                error(invalid, "the TLS handshake is not complete")
+            if self.secure:
+                return try self.channel.read_application(&self.connection, buffer)
+            return try self.connection.read(buffer)
         var link = try self.link_with(deadline, cancellation)
         if self.secure:
             return try self.channel.read_application(&link, buffer)
         return try link.read(buffer)
 
     ## Send all of `data` under the stream's deadline and return its length.
-    ## When secure, a failure part way leaves the TLS session unusable.
+    ## When secure, a failure part way leaves the TLS session unusable. In
+    ## nonblocking mode, accept what can go now and return its count: a plain
+    ## stream sends what the socket takes; a TLS stream seals up to one record,
+    ## which waits in the outgoing queue if the socket cannot take it all. With
+    ## records still queued nothing is accepted (io.would_block): `flush` first.
     pub func write(data: const u8[]) -> usize!:
+        if self.nonblocking and data.length > 0:
+            if self.handshake.length > 0:
+                error(invalid, "the TLS handshake is not complete")
+            if not try self.flush():
+                error(io.would_block, "the stream's queued records wait for the socket")
+            if not self.secure:
+                return try self.connection.write(data)
+            let count = data.length if data.length < record.max_fragment else record.max_fragment
+            try self.channel.write_application(&self.outbox, data[..<count])
+            _ = try self.flush()
+            return count
         try self.write_within(data, self.deadline, self.cancellation)
         return data.length
 
@@ -156,19 +192,116 @@ pub struct Stream: io.Reader, io.Writer:
             return
         if self.secure and self.channel.established():
             _ = self.send_close_notify() catch: recover ()
-        self.channel.wipe()
-        self.secure = false
+        self.release()
         try self.connection.close()
 
     ## Close without close_notify, ignoring errors; for unwinding.
     pub func destroy():
-        self.channel.wipe()
-        self.secure = false
+        self.release()
         self.connection.destroy()
 
+    ## Erase the session and release the handshake and the outgoing queue.
+    func release():
+        self.end_handshake()
+        self.outbox.release()
+        self.channel.wipe()
+        self.secure = false
+
     func send_close_notify() -> !:
+        if self.nonblocking:
+            # Best effort without waiting: what the socket takes now.
+            try self.channel.send_alert(&self.outbox, 1, 0)
+            _ = try self.flush()
+            return
         var link = try self.link()
         try self.channel.send_alert(&link, 1, 0)
+
+    # mark: Nonblocking mode ====================================================
+
+    ## Switch nonblocking mode on or off. In nonblocking mode no transfer waits:
+    ## one that cannot progress fails with io.would_block and is retried after
+    ## the descriptor's readiness. Records queue in the stream (`queued`) until
+    ## `flush` sends them. Turn it off only with nothing queued.
+    pub func set_nonblocking(enabled: bool) -> !:
+        if not enabled and self.outbox.count() > 0:
+            error(invalid, "records wait in the stream's outgoing queue")
+        if enabled and not self.prepared:
+            try self.connection.set_nonblocking(true)
+            self.prepared = true
+        self.nonblocking = enabled
+
+    ## Whether the stream is in nonblocking mode.
+    pub func is_nonblocking() -> bool:
+        return self.nonblocking
+
+    ## Bytes of records written but not yet sent: wait for write readiness and
+    ## `flush` while this is not zero.
+    pub func queued() -> usize:
+        return self.outbox.count()
+
+    ## Send queued records as far as the socket takes them; whether the queue
+    ## is now empty.
+    pub func flush() -> bool!:
+        while self.outbox.count() > 0:
+            let sent = self.connection.write(self.outbox.view()) catch failure:
+                if failure.code == io.would_block:
+                    return false
+                error(failure.code, failure.message)
+            self.outbox.consume(sent)
+        return true
+
+    ## Start the TLS client handshake for `host` without waiting (nonblocking
+    ## mode): the ClientHello is queued and sent as far as the socket takes it.
+    ## Then call `continue_tls` whenever the descriptor is readable (or writable
+    ## while records are queued) until it answers true.
+    pub func begin_tls(host: str, policy: Trust = Trust(), alpn: str = "") -> !:
+        if not self.nonblocking:
+            error(invalid, "begin_tls needs a nonblocking stream; use start_tls")
+        if self.secure or self.handshake.length > 0:
+            error(invalid, "the stream already uses TLS")
+        let storage = try new client.Handshake[1] --- in memory.heap
+        storage[0] = client.Handshake.start(&self.channel, &self.outbox, host, &policy, alpn) catch failure:
+            free(storage) in memory.heap
+            error(failure.code, failure.message)
+        self.handshake = storage
+        _ = try self.flush()
+
+    ## Advance the handshake `begin_tls` started with what has arrived; true
+    ## once it is complete and the stream is secure (its last flight may still
+    ## be queued). False when it waits for the peer. A failure ends it: the
+    ## stream is then unusable and should be closed.
+    pub func continue_tls() -> bool!:
+        if self.handshake.length == 0:
+            return self.secure
+        _ = try self.flush()
+        let done = self.handshake[0].step(&self.channel, &self.connection, &self.outbox) catch failure:
+            if failure.code == io.would_block:
+                _ = try self.flush()
+                return false
+            error(failure.code, failure.message)
+        self.end_handshake()
+        self.secure = done
+        _ = try self.flush()
+        return true
+
+    ## Erase and release the handshake `begin_tls` started, if any.
+    func end_handshake():
+        if self.handshake.length == 0:
+            return
+        self.handshake[0].close()
+        free(self.handshake) in memory.heap
+        var empty: client.Handshake[]
+        self.handshake = empty
+
+    ## Answer a TLS client on this plain stream as a small private-endpoint
+    ## server, under the stream's deadline: one P-256 certificate (`der`) and
+    ## its private key `d`, for loopback tests and private endpoints.
+    pub func accept_tls(der: const u8[], d: const u8[]) -> !:
+        if self.secure:
+            error(invalid, "the stream already uses TLS")
+        var link = try self.link()
+        try server.accept(&self.channel, &link, &link, der, d)
+        self.secure = true
 
     func link() -> net.DeadlineStream!:
         return try self.link_with(self.deadline, self.cancellation)
@@ -179,3 +312,54 @@ pub struct Stream: io.Reader, io.Writer:
             try self.connection.set_nonblocking(true)
             self.prepared = true
         return try net.DeadlineStream.over(&self.connection, deadline, cancellation)
+
+## A stream's outgoing queue: whole records the socket has not taken yet, in the
+## C heap. Writing appends; the stream sends from the front.
+struct Outbox: io.Writer:
+    var data: u8[]
+    var start: usize
+    var end: usize
+
+    ## Append all of `bytes`.
+    func write(bytes: const u8[]) -> usize!:
+        if bytes.length == 0:
+            return 0
+        if self.start == self.end:
+            self.start = 0
+            self.end = 0
+        if self.data.length - self.end < bytes.length:
+            let live = self.end - self.start
+            var capacity = self.data.length if self.data.length > 0 else 4096
+            while capacity < live + bytes.length:
+                capacity *= 2
+            let grown = try new u8[capacity] --- in memory.heap
+            memory.copy(grown, self.data[self.start..<self.end], live)
+            if self.data.length > 0:
+                free(self.data) in memory.heap
+            self.data = grown
+            self.start = 0
+            self.end = live
+        memory.copy(self.data[self.end..], bytes, bytes.length)
+        self.end += bytes.length
+        return bytes.length
+
+    ## The bytes waiting.
+    func view() -> const u8[]:
+        return self.data[self.start..<self.end]
+
+    ## How many bytes wait.
+    func count() -> usize:
+        return self.end - self.start
+
+    ## Drop `count` bytes from the front.
+    func consume(count: usize):
+        self.start += count
+
+    ## Release the storage.
+    func release():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        var empty: u8[]
+        self.data = empty
+        self.start = 0
+        self.end = 0

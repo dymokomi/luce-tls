@@ -45,6 +45,11 @@ try mail.start_tls("smtp.example.com")
 | `stream.descriptor()`, `stream.peer_address()` | for a `net.Poller`; check `pending()` first, never read the descriptor |
 | `stream.closed_by_peer() -> bool` | the server sent close_notify |
 | `stream.close() -> !`, `stream.destroy()` | close (close_notify when secure); destroy skips close_notify |
+| `stream.set_nonblocking(enabled) -> !`, `stream.is_nonblocking()` | nonblocking mode, for an event loop: no transfer waits |
+| `stream.begin_tls(host, policy = Trust(), alpn = "") -> !` | start the handshake without waiting (nonblocking mode); the ClientHello is queued |
+| `stream.continue_tls() -> bool!` | advance the handshake with what arrived; true once secure |
+| `stream.queued() -> usize`, `stream.flush() -> bool!` | records waiting for the socket; send them, true when none is left |
+| `stream.accept_tls(der, d) -> !` | answer a TLS client on a plain stream as the small private-endpoint server |
 
 Trust policies: `Trust.public_roots()` (the default `Trust()`: the bundled
 Mozilla roots),
@@ -56,6 +61,17 @@ The socket is kept nonblocking and every transfer waits through readiness like
 `net.DeadlineStream`. A read that times out (`net.timed_out`) or is cancelled
 (`net.cancelled`, e.g. by another thread ending an IMAP IDLE) leaves the stream
 usable: a partial TLS record is kept and the next read continues it.
+
+In nonblocking mode (`set_nonblocking(true)`, typically on a connection begun
+with `net.Connection.start_connect`) an event loop watches `descriptor()`:
+for write readiness while `queued()` is not zero, otherwise for read
+readiness. `read` and `write` fail with `io.would_block` instead of waiting
+(`write` accepts up to one record, which waits in the stream's outgoing queue
+if the socket cannot take it all, and accepts nothing while records are
+queued), and the handshake advances step by step: `begin_tls`, then
+`continue_tls` on each readiness until it answers true. The client handshake
+is one resumable state machine (`client.Handshake`: `start`, `step`); the
+blocking `connect` and `start_tls` run it to its end.
 
 The older `session` API (`connect`, `connect_public`, `connect_p384_chain`,
 `connect_trusted`, `upgrade_client`, `accept`, `send`, `receive`, `pending`

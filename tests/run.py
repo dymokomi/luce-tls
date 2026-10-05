@@ -12,6 +12,7 @@ SOURCES = [
     ("src/tls_tests.lucb", "tls-tests"),
     ("src/session_tests.lucb", "session-tests"),
     ("src/stream_tests.lucb", "stream-tests"),
+    ("src/nonblocking_tests.lucb", "nonblocking-tests"),
     ("src/handshake_tests.lucb", "handshake-tests"),
     ("src/x509_tests.lucb", "x509-tests"),
     ("src/chain_tests.lucb", "chain-tests"),

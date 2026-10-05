@@ -1,0 +1,191 @@
+## Loopback tests of a nonblocking tls_stream.Stream, as an event loop drives it: a
+## connection begun with net.Connection.start_connect, the handshake advanced by
+## begin_tls/continue_tls only when a poller reports readiness, a server that sends
+## its flight a few bytes at a time (so every record arrives in pieces), a
+## HelloRetryRequest, a 200000-byte upload through the outgoing queue, and a server
+## answering through Stream.accept_tls.
+import io
+from luce_std import net
+import thread
+from luce_crypto import native as crypto_native
+import stream as tls_stream
+import record
+import server
+import x509
+
+var g_d: u8[32]
+var g_qx: u8[32]
+var g_qy: u8[32]
+var g_cert: u8[2048]
+var g_cert_n: usize
+var g_port: @u64
+var g_ready: @u64
+var g_served: @u64
+
+let upload_size: usize = 200000
+
+## A sink that sends a few bytes at a time with a pause after each piece, so the
+## client reads every record in fragments.
+struct Drip: io.Writer:
+    var connection: net.Connection*
+
+    func write(data: const u8[]) -> usize!:
+        var sent: usize = 0
+        while sent < data.length:
+            let piece = data.length - sent if data.length - sent < 7 else 7
+            try io.write_all(self.connection, data[sent..<sent + piece])
+            sent += piece
+            thread.sleep(1)
+        return data.length
+
+## Wait, at most five seconds, until `flag` reaches `value`.
+func wait_for(flag: (@u64)*, value: u64):
+    var i: usize = 0
+    while flag.load(.acquire) < value and i < 500:
+        thread.sleep(10)
+        i += 1
+
+## The upload's byte at `index`.
+func pattern(index: usize) -> u8:
+    return (u8)((index * 31 + 7) % 251)
+
+## Receive the upload, check it, and answer with its length as text.
+func serve_upload(channel: record.Channel*, source: io.Reader, sink: io.Writer) -> !:
+    var buffer: u8[16384]
+    var received: usize = 0
+    while received < upload_size:
+        let n = try channel.read_application(source, buffer)
+        if n == 0:
+            error(record.invalid, "early close")
+        for i in 0..<n:
+            if buffer[i] != pattern(received + i):
+                error(record.invalid, "the upload is damaged")
+        received += n
+    try channel.write_application(sink, b"200000")
+
+func server_main(raw: void*?):
+    _ = raw
+    var listener = net.Listener.bind(net.SocketAddress.loopback(0)) catch failure:
+        return
+    let address = listener.address() catch failure:
+        return
+    g_port.store((u64)address.port, .release)
+    g_ready.store(1, .release)
+    # First client: the server's flight dripped, then a HelloRetryRequest for the second.
+    for index in 0..<2:
+        var conn = listener.accept() catch failure:
+            return
+        var drip = Drip(connection = &conn)
+        var channel = record.Channel()
+        server.accept(&channel, &conn, &drip, g_cert[..<g_cert_n], g_d, 0x0017 if index == 1 else 0) catch failure:
+            print(f"server: {failure.message}")
+            return
+        serve_upload(&channel, &conn, &conn) catch failure:
+            print(f"server: {failure.message}")
+            return
+        _ = conn.close() catch: recover ()
+    # Third: Stream.accept_tls on a plain stream.
+    let accepted = listener.accept() catch failure:
+        return
+    var stream = tls_stream.Stream.plain(accepted)
+    stream.accept_tls(g_cert[..<g_cert_n], g_d) catch failure:
+        print(f"accept_tls: {failure.message}")
+        return
+    var line: u8[5]
+    io.read_exact(&stream, line) catch failure:
+        return
+    io.write_all(&stream, line) catch failure:
+        return
+    _ = stream.close() catch: recover ()
+    g_served.store(1, .release)
+
+## Wait for what the stream needs next: write readiness while records are queued, read
+## readiness otherwise.
+func wait_ready(stream: tls_stream.Stream*) -> !:
+    var poller = try net.Poller.create(1)
+    defer poller.destroy()
+    let interest = net.WaitInterest.write if stream.queued() > 0 else net.WaitInterest.read
+    try poller.watch(0, stream.descriptor() else error(record.invalid, "no descriptor"), interest)
+    if (try poller.wait(try net.Deadline.after(5000000000))) == 0:
+        error(net.timed_out, "the stream waited too long")
+
+## Connect, handshake and upload through a nonblocking stream; answers how many times the
+## handshake had to wait for the peer.
+func run_client(port: u16, pinned: tls_stream.Trust) -> usize!:
+    var connection = try net.Connection.start_connect(net.SocketAddress.loopback(port))
+    var waits: usize = 0
+    while not try connection.finish_connect():
+        var poller = try net.Poller.create(1)
+        defer poller.destroy()
+        try poller.watch(0, connection.descriptor() else error(record.invalid, "no descriptor"), net.WaitInterest.write)
+        _ = try poller.wait(try net.Deadline.after(5000000000))
+    var stream = tls_stream.Stream.plain(connection)
+    defer stream.destroy()
+    try stream.set_nonblocking(true)
+    assert(stream.is_nonblocking())
+    try stream.begin_tls("localhost", pinned)
+    while not try stream.continue_tls():
+        waits += 1
+        try wait_ready(&stream)
+    assert(stream.is_secure())
+    # Reads before anything was sent back: would_block, not a wait.
+    var reply: u8[16]
+    var blocked = false
+    _ = stream.read(reply) catch failure:
+        assert(failure.code == io.would_block)
+        blocked = true
+        recover 0
+    assert(blocked)
+    # The upload: up to a record per write, queued when the socket is full.
+    var chunk: u8[30000]
+    var sent: usize = 0
+    while sent < upload_size:
+        let size = upload_size - sent if upload_size - sent < chunk.length else chunk.length
+        for i in 0..<size:
+            chunk[i] = pattern(sent + i)
+        var offset: usize = 0
+        while offset < size:
+            let accepted = stream.write(chunk[offset..<size]) catch failure:
+                assert(failure.code == io.would_block)
+                try wait_ready(&stream)
+                recover 0
+            offset += accepted
+        sent += size
+    while not try stream.flush():
+        try wait_ready(&stream)
+    var used: usize = 0
+    while used < 6:
+        let n = stream.read(reply[used..]) catch failure:
+            assert(failure.code == io.would_block)
+            try wait_ready(&stream)
+            recover 0
+        used += n
+    assert(used == 6 and reply[0] == '2' and reply[5] == '0')
+    try stream.close()
+    return waits
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    try crypto_native.ecdsa_p256_keygen(g_d, g_qx, g_qy)
+    g_cert_n = try x509.mint_self_signed("localhost", g_d, g_qx, g_qy, g_cert)
+    var worker = try thread.spawn(server_main, none, name = "tls-nonblocking-server")
+    defer worker.join() catch failure:
+        _ = failure
+    wait_for(&g_ready, 1)
+    assert(g_ready.load(.acquire) == 1)
+    let port = (u16)g_port.load(.acquire)
+    let pinned = try tls_stream.Trust.pinned_issuer(g_qx, g_qy)
+    # A dripped flight makes the handshake wait many times; a retry wait at least twice.
+    assert(try run_client(port, pinned) > 3)
+    assert(try run_client(port, pinned) >= 2)
+    # A blocking client against Stream.accept_tls.
+    var stream = try tls_stream.Stream.connect("localhost", port, true, policy = pinned)
+    try io.write_all(&stream, b"hello")
+    var echo: u8[5]
+    try io.read_exact(&stream, echo)
+    assert(echo[0] == 'h' and echo[4] == 'o')
+    try stream.close()
+    wait_for(&g_served, 1)
+    assert(g_served.load(.acquire) == 1)
+    print("PASS nonblocking Stream: start_connect, a dripped handshake, HelloRetryRequest, queued upload, accept_tls")
+    return 0

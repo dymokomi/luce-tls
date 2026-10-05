@@ -5,6 +5,7 @@
 ## Out of scope: PSK resumption, 0-RTT and client certificates (a
 ## CertificateRequest is answered with an empty Certificate, RFC 8446 §4.4.2).
 import io
+import memory
 import os
 import time
 from luce_crypto import native as crypto
@@ -31,78 +32,228 @@ struct ServerHello:
     var cookie: u8[1024]
     var cookie_size: usize
 
-## The ClientHello inputs that stay fixed across a HelloRetryRequest.
+## The ClientHello inputs that stay fixed across a HelloRetryRequest. The host name and
+## the ALPN protocol are kept inside, so a handshake owns everything it needs between steps.
 struct Hello:
     var random: u8[32]
     var session: u8[32]
-    var host: str
-    var alpn: str
+    var host_bytes: u8[253]
+    var host_size: usize
+    var alpn_bytes: u8[255]
+    var alpn_size: usize
     var certificate_requested: bool
     var request_context: u8[255]
     var request_context_size: usize
 
-## Run the client handshake for `host` on an already connected transport.
+    ## The server name.
+    func host() -> str:
+        return (str)self.host_bytes[..<self.host_size]
+
+    ## The one application protocol offered, or empty.
+    func alpn() -> str:
+        return (str)self.alpn_bytes[..<self.alpn_size]
+
+## The message a client handshake waits for next (RFC 8446 §2, the client's view).
+enum Stage:
+    server_hello
+    retried_server_hello
+    encrypted_extensions
+    certificate
+    certificate_verify
+    finished
+    done
+    failed
+
+## A TLS 1.3 client handshake that advances as the server's messages arrive, so it can run
+## over a nonblocking transport from an event loop as well as over a blocking one: `start`
+## sends the ClientHello, each `step` processes whatever messages have arrived, and a source
+## with nothing more yet (io.would_block) pauses it until the next step. What it sends goes
+## to the sink in whole records. Close it when done, whatever the outcome.
+pub struct Handshake:
+    var stage: Stage
+    var hello: Hello
+    var policy: trust.Trust
+    var now: i64
+    var share: hs.KeyShare
+    var messages: hs.Messages
+    var schedule: hs.Schedule
+    var suite: record.Suite
+    var first: u8[2048]
+    var first_size: usize
+    var retried_suite: u16
+    var server_key: signature.PublicKey
+
+    ## Begin a handshake for `host` on an already connected transport: the ClientHello
+    ## goes to `sink`. `now` is the Unix time for certificate validity; zero uses the wall
+    ## clock. `alpn`, when not empty, is the one application protocol offered and must be
+    ## what the server picks.
+    pub static func start(channel: record.Channel*, sink: io.Writer, host: str, policy: const trust.Trust*, alpn: str = "",
+                          now: i64 = 0) -> Handshake!:
+        try check_host(host)
+        if alpn.length > 255:
+            error(invalid, "ALPN protocol name is too long")
+        # The schedule restarts with the suite the server picks; until then it is the first offered one's.
+        let suite = try record.suite_for(offered_suites[0])
+        var handshake = Handshake(stage = Stage.server_hello, policy = *policy, now = now, suite = suite, schedule = try hs.Schedule.start(suite),
+                                  share = try hs.KeyShare.generate(hs.group_x25519), messages = try hs.Messages.create())
+        errdefer handshake.close()
+        memory.copy(handshake.hello.host_bytes, host.bytes, host.length)
+        handshake.hello.host_size = host.length
+        memory.copy(handshake.hello.alpn_bytes, alpn.bytes, alpn.length)
+        handshake.hello.alpn_size = alpn.length
+        try os.random_bytes(handshake.hello.random)
+        try os.random_bytes(handshake.hello.session)
+        handshake.first_size = try build_hello(handshake.first, &handshake.hello, &handshake.share, b"")
+        try channel.send(sink, record.handshake, handshake.first[..<handshake.first_size])
+        return handshake
+
+    ## Process the server's messages that `source` has, answering through `sink`; true once
+    ## the handshake is complete and the channel holds application traffic keys. When the
+    ## source has nothing more yet (io.would_block) the step stops with that error and the
+    ## next step resumes where it stopped. Any other failure ends the handshake.
+    pub func step(channel: record.Channel*, source: io.Reader, sink: io.Writer) -> bool!:
+        if self.stage == Stage.failed:
+            error(invalid, "the TLS handshake failed earlier")
+        while self.stage != Stage.done:
+            let message = self.messages.next(channel, source) catch failure:
+                if failure.code != io.would_block:
+                    self.stage = Stage.failed
+                error(failure.code, failure.message)
+            self.receive(channel, sink, message) catch failure:
+                self.stage = Stage.failed
+                error(failure.code, failure.message)
+        return true
+
+    ## Whether the handshake is complete.
+    pub func complete() -> bool:
+        return self.stage == Stage.done
+
+    ## Erase the handshake's secrets and release its buffer; safe to repeat.
+    pub func close():
+        self.share.wipe()
+        self.messages.close()
+        self.schedule.wipe()
+        crypto.wipe(u8[]((u8*)&self.first[0], memory.size_of(u8[2048])))
+
+    ## One complete message from the server, in the current stage.
+    func receive(channel: record.Channel*, sink: io.Writer, message: const u8[]) -> !:
+        match self.stage:
+            .server_hello:
+                var server = ServerHello()
+                try parse_server_hello(message, &self.hello, &server)
+                self.suite = try record.suite_for(server.suite)
+                self.schedule.wipe()
+                self.schedule = try hs.Schedule.start(self.suite)
+                if server.retry:
+                    try self.retry(channel, sink, message, &server)
+                    return
+                try self.schedule.add(self.first[..<self.first_size])
+                try self.enter_handshake(channel, message, &server)
+            .retried_server_hello:
+                var server = ServerHello()
+                try parse_server_hello(message, &self.hello, &server)
+                if server.retry or server.suite != self.retried_suite:
+                    error(invalid, "ServerHello disagrees with the HelloRetryRequest")
+                try self.enter_handshake(channel, message, &server)
+            .encrypted_extensions:
+                if message[0] != hs.encrypted_extensions:
+                    error(invalid, "expected EncryptedExtensions")
+                try check_encrypted_extensions(message, &self.hello)
+                try self.schedule.add(message)
+                self.stage = Stage.certificate
+            .certificate:
+                if message[0] == hs.certificate_request and not self.hello.certificate_requested:
+                    try note_certificate_request(message, &self.hello)
+                    try self.schedule.add(message)
+                    return
+                if message[0] != hs.certificate:
+                    error(invalid, "expected the server Certificate")
+                let at = self.now if self.now != 0 else time.unix()
+                self.server_key = try trust.authenticate(&self.policy, message, self.hello.host(), at)
+                try self.schedule.add(message)
+                self.stage = Stage.certificate_verify
+            .certificate_verify:
+                try self.verify(message)
+                try self.schedule.add(message)
+                self.stage = Stage.finished
+            .finished:
+                try self.finish(channel, sink, message)
+            .done, .failed:
+                error(invalid, "unexpected TLS handshake message")
+
+    ## A HelloRetryRequest: a new key share for the group the server asked for, and the
+    ## second ClientHello.
+    func retry(channel: record.Channel*, sink: io.Writer, message: const u8[], server: const ServerHello*) -> !:
+        if server.group == self.share.group or not offers_group(server.group):
+            error(invalid, "HelloRetryRequest selected an unusable group")
+        try self.schedule.add_retry_hash(self.first[..<self.first_size])
+        try self.schedule.add(message)
+        self.share.wipe()
+        self.share = try hs.KeyShare.generate(server.group)
+        var second: u8[2048]
+        let second_size = try build_hello(second, &self.hello, &self.share, server.cookie[..<server.cookie_size])
+        try self.schedule.add(second[..<second_size])
+        try channel.send(sink, record.handshake, second[..<second_size])
+        self.retried_suite = server.suite
+        self.stage = Stage.retried_server_hello
+
+    ## The ServerHello that settles the key exchange: the shared secret, the handshake
+    ## traffic keys for what the server sends next.
+    func enter_handshake(channel: record.Channel*, message: const u8[], server: const ServerHello*) -> !:
+        try self.schedule.add(message)
+        if server.group != self.share.group:
+            error(invalid, "ServerHello key share is for a group the client did not send")
+        if not self.messages.empty():
+            error(invalid, "handshake data straddles the TLS key change")
+        var shared: u8[48]
+        defer crypto.wipe(shared)
+        let shared_size = try self.share.agree(server.share[..<server.share_size], shared)
+        try self.schedule.enter_handshake(shared[..<shared_size])
+        try channel.protect_read(self.suite, self.schedule.handshake_secret(false))
+        self.stage = Stage.encrypted_extensions
+
+    ## The server's CertificateVerify: its signature over the transcript so far.
+    func verify(message: const u8[]) -> !:
+        if message[0] != hs.certificate_verify or message.length < 8 or hs.message_length(message) != message.length - 4:
+            error(invalid, "expected a well-formed CertificateVerify")
+        let scheme = u16_at(message, 4)
+        let size = (usize)u16_at(message, 6)
+        if size != message.length - 8:
+            error(invalid, "CertificateVerify signature length mismatch")
+        var transcript_hash: u8[48]
+        let hash_size = try self.schedule.current(transcript_hash)
+        var content: u8[160]
+        let content_size = hs.verify_content(true, transcript_hash[..<hash_size], content)
+        try signature.verify_scheme(&self.server_key, scheme, content[..<content_size], message[8..])
+
+    ## The server's Finished, then the client's flight and the application traffic keys.
+    func finish(channel: record.Channel*, sink: io.Writer, message: const u8[]) -> !:
+        let hash_size = self.suite.hash_size
+        var expected: u8[48]
+        try self.schedule.finished_value(self.schedule.handshake_secret(false), expected[..<hash_size])
+        try hs.check_finished(message, expected[..<hash_size])
+        try self.schedule.add(message)
+        if not self.messages.empty():
+            error(invalid, "unexpected handshake data after server Finished")
+        var client_secret: u8[48]
+        var server_secret: u8[48]
+        defer crypto.wipe(client_secret)
+        defer crypto.wipe(server_secret)
+        try self.schedule.enter_application(client_secret, server_secret)
+        try client_flight(channel, sink, &self.schedule, &self.hello, self.suite)
+        try channel.start_application(self.suite, server_secret[..<hash_size], client_secret[..<hash_size])
+        self.stage = Stage.done
+
+## Run the client handshake for `host` on an already connected transport to its end.
 ## `source` and `sink` usually view the same connection. `now` is the Unix time
 ## for certificate validity; zero uses the wall clock. `alpn`, when not empty,
 ## is the one application protocol offered and must be what the server picks.
 pub func connect(channel: record.Channel*, source: io.Reader, sink: io.Writer, host: str,
-    policy: const trust.Trust*, alpn: str = "", now: i64 = 0) -> !:
-    try check_host(host)
-    if alpn.length > 255:
-        error(invalid, "ALPN protocol name is too long")
-    var hello = Hello(host = host, alpn = alpn)
-    try os.random_bytes(hello.random)
-    try os.random_bytes(hello.session)
-    var share = try hs.KeyShare.generate(hs.group_x25519)
-    defer share.wipe()
-    var messages = try hs.Messages.create()
-    defer messages.close()
-    var first: u8[2048]
-    let first_size = try build_hello(first, &hello, &share, b"")
-    try channel.send(sink, record.handshake, first[..<first_size])
-    var reply = try messages.next(channel, source)
-    var server = ServerHello()
-    try parse_server_hello(reply, &hello, &server)
-    let suite = try record.suite_for(server.suite)
-    var schedule = try hs.Schedule.start(suite)
-    defer schedule.wipe()
-    if server.retry:
-        if server.group == share.group or not offers_group(server.group):
-            error(invalid, "HelloRetryRequest selected an unusable group")
-        try schedule.add_retry_hash(first[..<first_size])
-        try schedule.add(reply)
-        share.wipe()
-        share = try hs.KeyShare.generate(server.group)
-        var second: u8[2048]
-        let second_size = try build_hello(second, &hello, &share, server.cookie[..<server.cookie_size])
-        try schedule.add(second[..<second_size])
-        try channel.send(sink, record.handshake, second[..<second_size])
-        let retried_suite = server.suite
-        reply = try messages.next(channel, source)
-        server = ServerHello()
-        try parse_server_hello(reply, &hello, &server)
-        if server.retry or server.suite != retried_suite:
-            error(invalid, "ServerHello disagrees with the HelloRetryRequest")
-    else:
-        try schedule.add(first[..<first_size])
-    try schedule.add(reply)
-    if server.group != share.group:
-        error(invalid, "ServerHello key share is for a group the client did not send")
-    if not messages.empty():
-        error(invalid, "handshake data straddles the TLS key change")
-    var shared: u8[48]
-    defer crypto.wipe(shared)
-    let shared_size = try share.agree(server.share[..<server.share_size], shared)
-    try schedule.enter_handshake(shared[..<shared_size])
-    try channel.protect_read(suite, schedule.handshake_secret(false))
-    try server_flight(channel, source, &messages, &schedule, &hello, policy, now)
-    var client_secret: u8[48]
-    var server_secret: u8[48]
-    defer crypto.wipe(client_secret)
-    defer crypto.wipe(server_secret)
-    try schedule.enter_application(client_secret, server_secret)
-    try client_flight(channel, sink, &schedule, &hello, suite)
-    try channel.start_application(suite, server_secret[..<suite.hash_size], client_secret[..<suite.hash_size])
+                 policy: const trust.Trust*, alpn: str = "", now: i64 = 0) -> !:
+    var handshake = try Handshake.start(channel, sink, host, policy, alpn, now)
+    defer handshake.close()
+    while not try handshake.step(channel, source, sink):
+        continue
 
 ## Whether `group` is one the client listed in supported_groups.
 func offers_group(group: u16) -> bool:
@@ -152,13 +303,14 @@ func build_hello(out: u8[], hello: const Hello*, share: const hs.KeyShare*, cook
     b.put8(1)
     b.put8(0)
     let extensions = b.open(2)
-    if not is_ip_literal(hello.host):
+    let host = hello.host()
+    if not is_ip_literal(host):
         b.put16(0x0000)
         let sni = b.open(2)
         let list = b.open(2)
         b.put8(0)
-        b.put16(hello.host.length)
-        b.put(hello.host.bytes)
+        b.put16(host.length)
+        b.put(host.bytes)
         b.close(list, 2)
         b.close(sni, 2)
     b.put16(0x002b)
@@ -187,12 +339,13 @@ func build_hello(out: u8[], hello: const Hello*, share: const hs.KeyShare*, cook
     b.put(share.public_key())
     b.close(share_list, 2)
     b.close(shares, 2)
-    if hello.alpn.length > 0:
+    let protocol = hello.alpn()
+    if protocol.length > 0:
         b.put16(0x0010)
         let alpn = b.open(2)
         let names = b.open(2)
-        b.put8((u8)hello.alpn.length)
-        b.put(hello.alpn.bytes)
+        b.put8((u8)protocol.length)
+        b.put(protocol.bytes)
         b.close(names, 2)
         b.close(alpn, 2)
     if cookie.length > 0:
@@ -285,45 +438,6 @@ func parse_share(value: const u8[], out: ServerHello*) -> !:
         out.share[i] = value[4 + i]
     out.share_size = value.length - 4
 
-## Process EncryptedExtensions through server Finished.
-func server_flight(channel: record.Channel*, source: io.Reader, messages: hs.Messages*, schedule: hs.Schedule*,
-    hello: Hello*, policy: const trust.Trust*, now: i64) -> !:
-    var message = try messages.next(channel, source)
-    if message[0] != hs.encrypted_extensions:
-        error(invalid, "expected EncryptedExtensions")
-    try check_encrypted_extensions(message, hello)
-    try schedule.add(message)
-    message = try messages.next(channel, source)
-    if message[0] == hs.certificate_request:
-        try note_certificate_request(message, hello)
-        try schedule.add(message)
-        message = try messages.next(channel, source)
-    if message[0] != hs.certificate:
-        error(invalid, "expected the server Certificate")
-    let at = now if now != 0 else time.unix()
-    let key = try trust.authenticate(policy, message, hello.host, at)
-    try schedule.add(message)
-    message = try messages.next(channel, source)
-    if message[0] != hs.certificate_verify or message.length < 8 or hs.message_length(message) != message.length - 4:
-        error(invalid, "expected a well-formed CertificateVerify")
-    let scheme = u16_at(message, 4)
-    let size = (usize)u16_at(message, 6)
-    if size != message.length - 8:
-        error(invalid, "CertificateVerify signature length mismatch")
-    var transcript_hash: u8[48]
-    let hash_size = try schedule.current(transcript_hash)
-    var content: u8[160]
-    let content_size = hs.verify_content(true, transcript_hash[..<hash_size], content)
-    try signature.verify_scheme(&key, scheme, content[..<content_size], message[8..])
-    try schedule.add(message)
-    message = try messages.next(channel, source)
-    var expected: u8[48]
-    try schedule.finished_value(schedule.handshake_secret(false), expected[..<hash_size])
-    try hs.check_finished(message, expected[..<hash_size])
-    try schedule.add(message)
-    if not messages.empty():
-        error(invalid, "unexpected handshake data after server Finished")
-
 ## Remember a CertificateRequest's context; the client answers it with an
 ## empty certificate list. Its extensions are not interpreted.
 func note_certificate_request(message: const u8[], hello: Hello*) -> !:
@@ -353,7 +467,7 @@ func check_encrypted_extensions(message: const u8[], hello: const Hello*) -> !:
             error(invalid, "EncryptedExtensions entry runs past its container")
         if kind == 0x0010:
             let value = message[at..<at + size]
-            let name = hello.alpn.bytes
+            let name = hello.alpn().bytes
             if name.length == 0 or size != 3 + name.length or (usize)u16_at(value, 0) != size - 2 or (usize)value[2] != name.length:
                 error(invalid, "the server selected an ALPN protocol the client did not offer")
             if not crypto.equal(value[3..], name):
