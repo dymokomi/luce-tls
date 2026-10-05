@@ -91,7 +91,7 @@ pub struct Cipher:
     var sequence: u64
 
     ## Derive the key and IV of `suite` from a traffic secret (RFC 8446 §7.3).
-    pub func from_secret(suite: Suite, secret: const u8[]) -> Cipher!:
+    pub static func from_secret(suite: Suite, secret: const u8[]) -> Cipher!:
         var cipher = Cipher(suite = suite.id, key_size = suite.key_size)
         try tls.expand_label(secret, b"key", b"", cipher.key[..<suite.key_size], suite.hash)
         try tls.expand_label(secret, b"iv", b"", cipher.iv, suite.hash)
@@ -230,7 +230,7 @@ pub struct Channel:
         let sealed = length - tag_size
         let body = self.record[header_size..<header_size + sealed]
         try open(self.read.suite, self.read.key[..<self.read.key_size], nonce, self.record[..<header_size], body,
-            self.record[header_size + sealed..<header_size + length], body)
+                 self.record[header_size + sealed..<header_size + length], body)
         self.read.sequence += 1
         var at = sealed
         while at > 0 and body[at - 1] == 0:
@@ -288,7 +288,7 @@ pub struct Channel:
         self.write.nonce(nonce)
         let body = record[header_size..<header_size + inner]
         try seal(self.write.suite, self.write.key[..<self.write.key_size], nonce, record[..<header_size], body, body,
-            record[header_size + inner..<header_size + length])
+                 record[header_size + inner..<header_size + length])
         self.write.sequence += 1
         try io.write_all(sink, record[..<header_size + length])
 

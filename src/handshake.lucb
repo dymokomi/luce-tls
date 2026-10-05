@@ -40,7 +40,7 @@ pub struct Messages:
     var start: usize
 
     ## Allocate the bounded reassembly buffer.
-    pub func create() -> Messages!:
+    pub static func create() -> Messages!:
         return Messages(data = try new u8[message_capacity] in memory.heap)
 
     ## Release the buffer; safe to repeat.
@@ -98,7 +98,7 @@ pub struct Schedule:
     var server_handshake: u8[48]
 
     ## Begin a schedule with no PSK: early secret = HKDF-Extract(0, 0).
-    pub func start(suite: record.Suite) -> Schedule!:
+    pub static func start(suite: record.Suite) -> Schedule!:
         var schedule = Schedule(algorithm = suite.hash, size = suite.hash_size, transcript = try crypto.make_hash(suite.hash))
         var zeros: u8[48]
         _ = try crypto.hkdf_extract(zeros[..<suite.hash_size], zeros[..<suite.hash_size], schedule.secret, suite.hash)
@@ -204,7 +204,7 @@ pub struct Builder:
     var at: usize
 
     ## A builder over `data`.
-    pub func over(data: u8[]) -> Builder:
+    pub static func over(data: u8[]) -> Builder:
         return Builder(data = data, at = 0)
 
     ## Bytes written so far.
@@ -246,7 +246,7 @@ pub struct KeyShare:
 
     ## A fresh key pair for `group` (x25519, or secp256r1 as an uncompressed
     ## point; its scalar multiplication is variable-time, see luce-crypto).
-    pub func generate(group: u16) -> KeyShare!:
+    pub static func generate(group: u16) -> KeyShare!:
         var share = KeyShare(group = group)
         if group == group_x25519:
             try os.random_bytes(share.secret)

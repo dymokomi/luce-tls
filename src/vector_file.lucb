@@ -15,7 +15,7 @@ pub struct Lines:
     var next_start: usize
 
     ## Load `directory`/`name`.
-    pub func open(directory: str, name: const u8[]) -> Lines!:
+    pub static func open(directory: str, name: const u8[]) -> Lines!:
         var path: u8[1024]
         let contents = try read(join(directory, name, path))
         return Lines(contents = contents, text = contents.value)

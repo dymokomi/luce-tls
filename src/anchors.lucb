@@ -25,15 +25,15 @@ pub struct Anchors:
     var named: usize
 
     ## The Mozilla roots trusted for TLS server authentication.
-    pub func mozilla() -> Anchors:
+    pub static func mozilla() -> Anchors:
         return Anchors(kind = kind_bundled)
 
     ## A single explicit key, for private servers or pinned public roots.
-    pub func single(key: signature.PublicKey) -> Anchors:
+    pub static func single(key: signature.PublicKey) -> Anchors:
         return Anchors(kind = kind_single, key = key)
 
     ## An empty list of named anchors; fill it with `add` or `add_certificate`.
-    pub func named_list() -> Anchors:
+    pub static func named_list() -> Anchors:
         return Anchors(kind = kind_named)
 
     ## Add an anchor with this subject Name (DER) and key.
