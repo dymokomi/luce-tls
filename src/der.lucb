@@ -63,15 +63,6 @@ pub func oid_is(der: const u8[], element: Element, expected: const u8[]) -> bool
             return false
     return true
 
-## Whether two byte ranges are equal.
-pub func same(a: const u8[], b: const u8[]) -> bool:
-    if a.length != b.length:
-        return false
-    for i in 0..<a.length:
-        if a[i] != b[i]:
-            return false
-    return true
-
 ## The magnitude bytes of a non-negative, minimally encoded INTEGER (without
 ## the sign octet).
 pub func positive_integer(der: const u8[], element: Element) -> const u8[]!:

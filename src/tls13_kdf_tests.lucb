@@ -60,7 +60,7 @@ pub func main(arguments: str[]) -> i32!:
         else:
             try expand(&lines, algorithm, out[..<wanted_size])
             expanded += 1
-        if not der.same(out[..<wanted_size], wanted[..<wanted_size]):
+        if out[..<wanted_size] != wanted[..<wanted_size]:
             print(f"TLS13-KDF case {extracted + expanded} differs")
             error(der.invalid, "OpenSSL TLS13-KDF vector mismatch")
     assert(extracted + expanded == 562 and skipped == 9, "every TLS13-KDF stanza is run or listed")

@@ -111,11 +111,6 @@ func server_main(raw: void*?):
         recover ()
     _ = rejected.close() catch: recover ()
 
-func expect_text(actual: const u8[], expected: const u8[]):
-    assert(actual.length == expected.length)
-    for i in 0..<actual.length:
-        assert(actual[i] == expected[i])
-
 func implicit_tls(port: u16, pinned: tls_stream.Trust) -> !:
     var stream = try tls_stream.Stream.connect("localhost", port, true, policy = pinned)
     assert(stream.is_secure())
@@ -126,17 +121,17 @@ func implicit_tls(port: u16, pinned: tls_stream.Trust) -> !:
     try io.write_all(&stream, big)
     var back: u8[40000]
     try io.read_exact(&stream, back)
-    expect_text(back, big)
+    assert(back == big)
     # Pending plaintext is visible to wait() without touching the socket.
     var two: u8[2]
     try io.read_exact(&stream, two)
-    expect_text(two, b"ab")
+    assert(two == b"ab")
     assert(stream.pending() == 4)
     let ready = try stream.wait()
     assert(ready.readable)
     var four: u8[4]
     try io.read_exact(&stream, four)
-    expect_text(four, b"cdef")
+    assert(four == b"cdef")
     assert(stream.pending() == 0)
     # A deadline that expires leaves the stream usable.
     stream.set_deadline(try net.Deadline.after(50000000))
@@ -158,7 +153,7 @@ func implicit_tls(port: u16, pinned: tls_stream.Trust) -> !:
     assert(cancelled)
     g_step.store(2, .release)
     try io.read_exact(&stream, late)
-    expect_text(late, b"late")
+    assert(late == b"late")
     try stream.close()
     try stream.close()
 
@@ -168,17 +163,17 @@ func starttls(port: u16, pinned: tls_stream.Trust) -> !:
     assert(not stream.is_secure())
     var greeting: u8[12]
     try io.read_exact(&stream, greeting)
-    expect_text(greeting, b"* OK ready\r\n")
+    assert(greeting == b"* OK ready\r\n")
     try io.write_all(&stream, b"a1 STARTTLS\n")
     var reply: u8[10]
     try io.read_exact(&stream, reply)
-    expect_text(reply, b"a1 OK go\r\n")
+    assert(reply == b"a1 OK go\r\n")
     try stream.start_tls("localhost", pinned)
     assert(stream.is_secure())
     try io.write_all(&stream, b"a2 NOOP\r\n")
     var echo: u8[9]
     try io.read_exact(&stream, echo)
-    expect_text(echo, b"a2 NOOP\r\n")
+    assert(echo == b"a2 NOOP\r\n")
     try stream.close()
 
 pub func main(arguments: str[]) -> i32!:

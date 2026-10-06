@@ -32,7 +32,7 @@ struct Trace:
     func expect(name: const u8[], value: const u8[]) -> !:
         var wanted: u8[8192]
         let size = try self.get(name, wanted)
-        if not der.same(wanted[..<size], value):
+        if wanted[..<size] != value:
             print(f"RFC 8448 item {(str)name} differs")
             error(der.invalid, "RFC 8448 trace mismatch")
         self.checked += 1
@@ -46,12 +46,12 @@ func joined(base: const u8[], suffix: const u8[], out: u8[]) -> const u8[]:
     return out[..<base.length + suffix.length]
 
 func ends_with(text: const u8[], suffix: const u8[]) -> bool:
-    return text.length >= suffix.length and der.same(text[text.length - suffix.length..], suffix)
+    return text.length >= suffix.length and text[text.length - suffix.length..] == suffix
 
 func contains(text: const u8[], part: const u8[]) -> bool:
     var at: usize = 0
     while at + part.length <= text.length:
-        if der.same(text[at..<at + part.length], part):
+        if text[at..<at + part.length] == part:
             return true
         at += 1
     return false
@@ -147,7 +147,7 @@ func transfer(trace: Trace*, step: const u8[], kind: u8, sender: record.Channel*
     traced[2] = traced_minor
     try trace.expect(joined(step, b".complete_record", name), traced[..<sent.length])
     var reader = io.SliceReader.over(writer.written())
-    if try receiver.next(&reader) != kind or not der.same(receiver.plaintext(), payload[..<size]):
+    if try receiver.next(&reader) != kind or receiver.plaintext() != payload[..<size]:
         print(f"RFC 8448 record {(str)step} did not decrypt to its payload")
         error(der.invalid, "RFC 8448 record mismatch")
     if kind == record.alert:

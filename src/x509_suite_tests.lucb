@@ -107,7 +107,7 @@ func bearssl(directory: str, counts: Counts*) -> !:
                 continue
             var i: usize = 0
             while vectors.item(wanted, i).length != 0:
-                if der.same(vectors.item(wanted, i), try anchor_lines.field(1)):
+                if vectors.item(wanted, i) == (try anchor_lines.field(1)):
                     try bearssl_anchor(&anchor_lines, &trusted)
                 i += 1
         try counts.check(&cases, directory, &trusted)

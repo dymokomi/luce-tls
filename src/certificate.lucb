@@ -61,7 +61,7 @@ pub struct Certificate:
 
     ## Whether issuer and subject are the same Name (RFC 5280 self-issued).
     pub func self_issued(bytes: const u8[]) -> bool:
-        return der.same(self.issuer(bytes), self.subject(bytes))
+        return self.issuer(bytes) == self.subject(bytes)
 
     ## Whether `now` lies within the validity period, inclusive.
     pub func valid_at(now: i64) -> bool:
@@ -151,7 +151,7 @@ func parse_pss(bytes: const u8[], at: usize, limit: usize) -> u8!:
     let mgf_oid = try der.expect(bytes, mgf.content, mgf.end(), 0x06)
     let mgf_hash = try der.expect(bytes, mgf_oid.next, mgf.end(), 0x30)
     let mgf_hash_oid = try der.expect(bytes, mgf_hash.content, mgf_hash.end(), 0x06)
-    if not der.oid_is(bytes, mgf_oid, oid_mgf1) or not der.same(bytes[mgf_hash_oid.content..<mgf_hash_oid.end()], bytes[hash_oid.content..<hash_oid.end()]):
+    if not der.oid_is(bytes, mgf_oid, oid_mgf1) or bytes[mgf_hash_oid.content..<mgf_hash_oid.end()] != bytes[hash_oid.content..<hash_oid.end()]:
         return 0
     pos = mgf_field.next
     if pos >= params.end() or bytes[pos] != 0xa2:
@@ -278,7 +278,7 @@ func parse_extensions(bytes: const u8[], at: usize, limit: usize, cert: Certific
         let extension = try der.expect(bytes, pos, sequence.end(), 0x30)
         let oid = try der.expect(bytes, extension.content, extension.end(), 0x06)
         for i in 0..<seen:
-            if der.same(bytes[oid.content..<oid.end()], bytes[seen_start[i]..<seen_end[i]]):
+            if bytes[oid.content..<oid.end()] == bytes[seen_start[i]..<seen_end[i]]:
                 error(invalid, "duplicate certificate extension")
         seen_start[seen] = oid.content
         seen_end[seen] = oid.end()
@@ -295,17 +295,17 @@ func parse_extensions(bytes: const u8[], at: usize, limit: usize, cert: Certific
         if value.next != extension.end():
             error(invalid, "trailing extension fields")
         let id = bytes[oid.content..<oid.end()]
-        if der.same(id, b"\x55\x1d\x0f"):
+        if id == b"\x55\x1d\x0f":
             try parse_key_usage(bytes, value, cert)
-        elif der.same(id, b"\x55\x1d\x11"):
+        elif id == b"\x55\x1d\x11":
             try parse_san(bytes, value, cert)
-        elif der.same(id, b"\x55\x1d\x13"):
+        elif id == b"\x55\x1d\x13":
             try parse_basic_constraints(bytes, value, cert)
-        elif der.same(id, b"\x55\x1d\x25"):
+        elif id == b"\x55\x1d\x25":
             try parse_eku(bytes, value, cert)
-        elif der.same(id, b"\x55\x1d\x1e"):
+        elif id == b"\x55\x1d\x1e":
             error(invalid, "nameConstraints are not supported")
-        elif der.same(id, b"\x55\x1d\x20"):
+        elif id == b"\x55\x1d\x20":
             if critical:
                 try check_critical_policies(bytes, value)
         elif critical:
@@ -360,7 +360,7 @@ pub func parse(bytes: const u8[]) -> Certificate!:
     if serial.length == 0 or serial.length > 21:
         error(invalid, "invalid certificate serial number")
     let inner_algorithm = try der.expect(bytes, serial.next, tbs.end(), 0x30)
-    if not der.same(bytes[inner_algorithm.start..<inner_algorithm.next], bytes[outer_algorithm.start..<outer_algorithm.next]):
+    if bytes[inner_algorithm.start..<inner_algorithm.next] != bytes[outer_algorithm.start..<outer_algorithm.next]:
         error(invalid, "certificate signature algorithms disagree")
     let issuer = try der.expect(bytes, inner_algorithm.next, tbs.end(), 0x30)
     cert.issuer_start = issuer.start
