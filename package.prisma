@@ -10,13 +10,11 @@ def package "luce-tls" {
 
     def dependency "luce-crypto" {
         str owner = "dymokomi"
-        str version = "^0.5.0"
         str path = "../luce-crypto"
     }
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.6.0"
         str path = "../luce-std"
     }
 }
