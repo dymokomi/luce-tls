@@ -133,7 +133,7 @@ func check(fixture: Fixture*) -> !:
 
 ## Optional argument: the fixture directory (default tests/chains).
 pub func main(arguments: str[]) -> i32!:
-    let directory = arguments[1] if arguments.length > 1 else "tests/chains"
+    let directory = arguments[1] if arguments.length > 1 else "../chains"
     for i in 0..<fixtures.length:
         var fixture = Fixture()
         try load(directory, fixtures[i], &fixture)

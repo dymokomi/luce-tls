@@ -123,16 +123,11 @@ store.
 ## Tests
 
 ```sh
-python3 tools/bootstrap.py
-python3 tests/run.py
-python3 tests/sanitize.py
+luc test
 ```
 
-Bootstrap verifies the sibling compiler/crypto revisions in `bootstrap/` and
-builds tools inside this package. Both test runners accept `--base PATH` for
-an existing compiler. Caches default to `build/cache` (`LUCE_CACHE` may
-override). The matrix exercises native optimization levels 0–3 and C
-debug/release: loopback client/server handshakes, Stream reads and writes
+Every check is a test program, `tests/<name>/main.lucb` (`tests/handshake`, `tests/stream`,
+`tests/x509_suite`, ...), built and run by `luc test`. They cover loopback client/server handshakes, Stream reads and writes
 across records, pending plaintext, deadline timeouts that resume, cancellation
 from another thread, a plain exchange then an in-place STARTTLS upgrade that
 answers a CertificateRequest, close_notify, a wrong pin, the captured Lucia OS Caddy/Let's Encrypt

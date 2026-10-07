@@ -38,7 +38,7 @@ func expand(lines: const vectors.Lines*, algorithm: str, out: u8[]) -> !:
 
 ## Optional argument: the tests/vectors directory.
 pub func main(arguments: str[]) -> i32!:
-    let directory = arguments[1] if arguments.length > 1 else "tests/vectors"
+    let directory = arguments[1] if arguments.length > 1 else "../vectors"
     var lines = try vectors.Lines.open(directory, b"openssl_tls13_kdf.txt")
     defer lines.close()
     var extracted: usize = 0
