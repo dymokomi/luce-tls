@@ -133,7 +133,7 @@ func openssl(directory: str, counts: Counts*) -> !:
 
 ## Optional argument: the tests/x509 directory.
 pub func main(arguments: str[]) -> i32!:
-    let directory = arguments[1] if arguments.length > 1 else "../x509"
+    let directory = arguments[1] if arguments.length > 1 else "tests/x509"
     var bear = Counts()
     var path: u8[1024]
     try bearssl(vectors.join(directory, b"bearssl", path), &bear)
